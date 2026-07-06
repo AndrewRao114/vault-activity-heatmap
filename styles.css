@@ -1,0 +1,180 @@
+/* Vault Activity Heatmap */
+
+.vah-container {
+	padding: 4px 8px;
+}
+
+/* stats header */
+.vah-stats {
+	display: flex;
+	gap: 28px;
+	margin: 4px 0 14px 0;
+}
+
+.vah-stat-num {
+	font-size: 1.7em;
+	font-weight: 700;
+	line-height: 1.1;
+}
+
+.vah-stat-label {
+	font-size: 0.68em;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--text-muted);
+}
+
+/* controls */
+.vah-controls {
+	margin-bottom: 10px;
+}
+
+.vah-controls select {
+	max-width: 100%;
+}
+
+.vah-hint {
+	font-size: 0.85em;
+	color: var(--text-muted);
+	margin-bottom: 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	align-items: flex-start;
+}
+
+/* grid */
+.vah-scroll {
+	overflow-x: auto;
+	padding-bottom: 4px;
+}
+
+.vah-months {
+	display: flex;
+	margin-left: 30px;
+	font-size: 0.65em;
+	color: var(--text-muted);
+	height: 14px;
+}
+
+.vah-month-slot {
+	flex: 0 0 14px;
+	white-space: nowrap;
+	overflow: visible;
+}
+
+.vah-body {
+	display: flex;
+}
+
+.vah-weekdays {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	width: 30px;
+	flex: 0 0 30px;
+}
+
+.vah-weekday {
+	height: 11px;
+	font-size: 0.6em;
+	line-height: 11px;
+	color: var(--text-muted);
+}
+
+.vah-grid {
+	display: flex;
+	gap: 3px;
+}
+
+.vah-week {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.vah-cell {
+	width: 11px;
+	height: 11px;
+	flex: 0 0 11px;
+	border-radius: 3px;
+	background-color: var(--background-modifier-border);
+	cursor: pointer;
+}
+
+.vah-cell.vah-future {
+	background-color: transparent;
+	cursor: default;
+}
+
+.vah-cell.vah-today {
+	outline: 1.5px solid var(--text-accent);
+	outline-offset: 0.5px;
+}
+
+/* legend */
+.vah-legend {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 4px;
+	margin-top: 8px;
+	font-size: 0.68em;
+	color: var(--text-muted);
+}
+
+.vah-legend .vah-legend-swatch {
+	cursor: default;
+}
+
+/* day detail */
+.vah-detail {
+	margin-top: 12px;
+	border-top: 1px solid var(--background-modifier-border);
+	padding-top: 6px;
+}
+
+.vah-detail h6 {
+	margin: 4px 0 8px 0;
+}
+
+.vah-detail-empty {
+	font-size: 0.85em;
+	color: var(--text-muted);
+}
+
+.vah-detail-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	max-height: 220px;
+	overflow-y: auto;
+}
+
+.vah-detail-row {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 0.85em;
+}
+
+.vah-detail-link {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--text-muted);
+}
+
+.vah-detail-link-live {
+	color: var(--text-accent);
+	cursor: pointer;
+}
+
+.vah-detail-link-live:hover {
+	text-decoration: underline;
+}
+
+.vah-detail-edits {
+	color: var(--text-faint);
+	flex: 0 0 auto;
+}

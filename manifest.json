@@ -1,0 +1,9 @@
+{
+	"id": "vault-activity-heatmap",
+	"name": "Vault Activity Heatmap",
+	"version": "1.0.0",
+	"minAppVersion": "1.4.0",
+	"description": "GitHub-style contribution heatmap of your daily note-taking activity — per vault or per folder, with configurable colors and thresholds.",
+	"author": "Andrew",
+	"isDesktopOnly": false
+}
