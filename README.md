@@ -36,6 +36,17 @@ and it turns dark. Just like a commit graph, but for your vault.
   configurable as well.
 - **Backfill** — seed the graph from the created/modified dates of the notes
   you already have, so it isn't empty on day one.
+- **AI weekly/monthly summaries** — bring your own API key (Anthropic or any
+  OpenAI-compatible endpoint) and the plugin summarizes what you wrote each
+  week/month into a note in `AI summaries/`, automatically when a period
+  completes or on demand (commands + buttons in settings). Notifies you via a
+  **desktop notification** and optionally your **phone** through an
+  [ntfy.sh](https://ntfy.sh) topic or any webhook.
+- **Custom panel theme** — style the heatmap panel without touching your
+  Obsidian theme: set any PNG/JPG/GIF/WebP image *or a looping MP4/WebM clip*
+  as the panel backdrop (vault path or URL), with dim and blur sliders, plus
+  panel-only text and background color overrides. Task rows turn
+  frosted-glass over a backdrop.
 
 ## Installation (manual)
 
