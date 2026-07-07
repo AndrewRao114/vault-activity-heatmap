@@ -1,19 +1,31 @@
 import {
 	App,
+	ColorComponent,
 	DropdownComponent,
 	ItemView,
+	Menu,
+	Modal,
 	Notice,
 	Plugin,
 	PluginSettingTab,
 	Setting,
 	TAbstractFile,
+	TextComponent,
 	TFile,
 	TFolder,
 	WorkspaceLeaf,
 	debounce,
+	moment,
 } from "obsidian";
 
 export const VIEW_TYPE_HEATMAP = "vault-activity-heatmap";
+
+// Obsidian ships moment at runtime, but its .d.ts exposes it as a namespace
+// type without call signatures, so give it a minimal callable shape here.
+const momentFn = moment as unknown as (
+	input?: string | Date,
+	format?: string
+) => { format(fmt: string): string };
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -34,6 +46,8 @@ type Metric = "files" | "edits";
 
 interface HeatmapSettings {
 	baseColor: string;
+	/** Hex color for zero-activity squares; empty string = theme default. */
+	emptyColor: string;
 	metric: Metric;
 	/** Ascending boundaries for intensity levels 1-4, e.g. [1, 3, 6, 10]. */
 	thresholds: number[];
@@ -44,16 +58,26 @@ interface HeatmapSettings {
 	firstDayOfWeek: number;
 	/** Last folder filter chosen in the view; persisted for convenience. */
 	lastFolderFilter: string;
+	/** Folder where daily reflection notes live. */
+	reflectionFolder: string;
+	/** Moment.js format for reflection note file names. */
+	dailyNoteFormat: string;
+	/** Heading that tasks are appended under; empty = end of note. */
+	taskHeading: string;
 }
 
 const DEFAULT_SETTINGS: HeatmapSettings = {
 	baseColor: "#40c463",
+	emptyColor: "",
 	metric: "files",
 	thresholds: [1, 3, 6, 10],
 	weeksToShow: 26,
 	excludeFolders: [],
 	firstDayOfWeek: 1,
 	lastFolderFilter: "",
+	reflectionFolder: "Daily reflection",
+	dailyNoteFormat: "YYYY-MM-DD",
+	taskHeading: "## Tasks",
 };
 
 interface PersistedData {
@@ -93,6 +117,37 @@ function hexToRgb(hex: string): [number, number, number] {
 	return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
+function hexToRgbString(hex: string): string {
+	const [r, g, b] = hexToRgb(hex);
+	return `${r}, ${g}, ${b}`;
+}
+
+/**
+ * Accepts "#40c463", "40c463", "#4c6", "64, 196, 99" or "64 196 99" and
+ * returns a normalized hex color, or null if the input is not a color.
+ */
+function parseColorInput(input: string): string | null {
+	const s = input.trim();
+	if (!s) return null;
+	// 3-digit shorthand needs the leading # so plain numbers like "255"
+	// (someone mid-typing an RGB triple) are not misread as hex
+	const hexMatch =
+		s.match(/^#([0-9a-f]{6}|[0-9a-f]{3})$/i) ?? s.match(/^([0-9a-f]{6})$/i);
+	if (hexMatch) {
+		let h = hexMatch[1].toLowerCase();
+		if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+		return "#" + h;
+	}
+	const parts = s.split(/[,\s]+/).filter(Boolean).map(Number);
+	if (
+		parts.length === 3 &&
+		parts.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)
+	) {
+		return "#" + parts.map((n) => n.toString(16).padStart(2, "0")).join("");
+	}
+	return null;
+}
+
 /** Background color for an intensity level 1-4 derived from the base color. */
 function levelColor(baseColor: string, level: number): string {
 	const [r, g, b] = hexToRgb(baseColor);
@@ -103,6 +158,97 @@ function levelColor(baseColor: string, level: number): string {
 function isUnderFolder(path: string, folder: string): boolean {
 	if (!folder) return true;
 	return path.startsWith(folder + "/");
+}
+
+/** Normalize heading text for comparison; trailing hashes of closed ATX headings ("## Tasks ##") are not part of the text. */
+function normalizeHeadingText(text: string): string {
+	return text.replace(/\s+#+\s*$/, "").trim().toLowerCase();
+}
+
+/**
+ * Lines that must never be treated as headings: YAML frontmatter and fenced
+ * code blocks (a "# comment" inside either is not a markdown heading).
+ */
+function nonHeadingLines(lines: string[]): boolean[] {
+	const ignored = new Array<boolean>(lines.length).fill(false);
+	let start = 0;
+	if (lines.length > 0 && lines[0].trim() === "---") {
+		let close = -1;
+		for (let j = 1; j < lines.length; j++) {
+			const t = lines[j].trim();
+			if (t === "---" || t === "...") {
+				close = j;
+				break;
+			}
+		}
+		if (close !== -1) {
+			for (let j = 0; j <= close; j++) ignored[j] = true;
+			start = close + 1;
+		}
+	}
+	let fenceChar = "";
+	let fenceLen = 0;
+	for (let i = start; i < lines.length; i++) {
+		const t = lines[i].trimStart();
+		if (fenceChar) {
+			ignored[i] = true;
+			const m = t.match(/^(`{3,}|~{3,})\s*$/);
+			if (m && m[1][0] === fenceChar && m[1].length >= fenceLen) fenceChar = "";
+		} else {
+			const m = t.match(/^(`{3,}|~{3,})/);
+			if (m) {
+				fenceChar = m[1][0];
+				fenceLen = m[1].length;
+				ignored[i] = true;
+			}
+		}
+	}
+	return ignored;
+}
+
+/**
+ * Insert `line` at the end of the section that starts with `heading`.
+ * If the heading is missing it is appended (with the line) at the end.
+ * An empty heading appends the line to the end of the note.
+ */
+function insertUnderHeading(content: string, heading: string, line: string): string {
+	const h = heading.trim();
+	if (!h) {
+		const trimmed = content.replace(/\s+$/, "");
+		return (trimmed ? trimmed + "\n" : "") + line + "\n";
+	}
+	const headingText = normalizeHeadingText(h.replace(/^#+\s*/, ""));
+	const headingLine = h.startsWith("#") ? h : "## " + h;
+
+	const lines = content.split("\n");
+	const skip = nonHeadingLines(lines);
+	let idx = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (skip[i]) continue;
+		const m = lines[i].match(/^#{1,6}\s+(.*)$/);
+		if (m && normalizeHeadingText(m[1]) === headingText) {
+			idx = i;
+			break;
+		}
+	}
+	if (idx === -1) {
+		const trimmed = content.replace(/\s+$/, "");
+		return (trimmed ? trimmed + "\n\n" : "") + headingLine + "\n" + line + "\n";
+	}
+	// section ends at the next heading (any level) or end of file
+	let end = lines.length;
+	for (let i = idx + 1; i < lines.length; i++) {
+		if (skip[i]) continue;
+		if (/^#{1,6}\s/.test(lines[i])) {
+			end = i;
+			break;
+		}
+	}
+	// skip back over trailing blank lines so the task joins the list
+	let insertAt = end;
+	while (insertAt > idx + 1 && lines[insertAt - 1].trim() === "") insertAt--;
+	lines.splice(insertAt, 0, line);
+	return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +281,16 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 			id: "backfill-history",
 			name: "Backfill history from existing file dates",
 			callback: () => this.backfillFromFileStats(),
+		});
+
+		this.addCommand({
+			id: "add-task-today",
+			name: "Add task to today's daily reflection",
+			callback: () => {
+				new AddTaskModal(this.app, toDateKey(new Date()), (text) => {
+					void this.addTaskToDailyReflection(toDateKey(new Date()), text);
+				}).open();
+			},
 		});
 
 		this.addSettingTab(new HeatmapSettingTab(this.app, this));
@@ -250,6 +406,78 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 		new Notice("Heatmap history cleared.");
 	}
 
+	// -- daily reflection notes ------------------------------------------------
+
+	dailyNotePath(dateKey: string): string {
+		const fmt = this.settings.dailyNoteFormat.trim() || "YYYY-MM-DD";
+		const name = momentFn(dateKey, "YYYY-MM-DD").format(fmt);
+		const folder = this.settings.reflectionFolder
+			.trim()
+			.replace(/^\/+|\/+$/g, "");
+		return (folder ? folder + "/" : "") + name + ".md";
+	}
+
+	private async ensureFolder(folderPath: string) {
+		if (!folderPath) return;
+		const parts = folderPath.split("/");
+		let current = "";
+		for (const part of parts) {
+			current = current ? current + "/" + part : part;
+			if (!this.app.vault.getAbstractFileByPath(current)) {
+				try {
+					await this.app.vault.createFolder(current);
+				} catch (e) {
+					// folder may have been created concurrently; ignore
+				}
+			}
+		}
+	}
+
+	private headingLine(): string {
+		const h = this.settings.taskHeading.trim();
+		if (!h) return "";
+		return h.startsWith("#") ? h : "## " + h;
+	}
+
+	/** Get the reflection note for a date, creating folder + note if needed. */
+	private async getOrCreateDailyNote(dateKey: string): Promise<TFile | null> {
+		const path = this.dailyNotePath(dateKey);
+		const existing = this.app.vault.getAbstractFileByPath(path);
+		if (existing instanceof TFile) return existing;
+		if (existing) {
+			new Notice(`Heatmap: "${path}" exists but is not a note.`);
+			return null;
+		}
+		const dir = path.includes("/")
+			? path.slice(0, path.lastIndexOf("/"))
+			: "";
+		await this.ensureFolder(dir);
+		const heading = this.headingLine();
+		try {
+			return await this.app.vault.create(path, heading ? heading + "\n" : "");
+		} catch (e) {
+			new Notice(`Heatmap: could not create "${path}".`);
+			console.error("vault-activity-heatmap: create failed", e);
+			return null;
+		}
+	}
+
+	async addTaskToDailyReflection(dateKey: string, taskText: string) {
+		const file = await this.getOrCreateDailyNote(dateKey);
+		if (!file) return;
+		const taskLine = `- [ ] ${taskText}`;
+		await this.app.vault.process(file, (content) =>
+			insertUnderHeading(content, this.settings.taskHeading, taskLine)
+		);
+		new Notice(`Task added to ${file.path}`);
+	}
+
+	async openDailyReflection(dateKey: string) {
+		const file = await this.getOrCreateDailyNote(dateKey);
+		if (!file) return;
+		await this.app.workspace.getLeaf(false).openFile(file);
+	}
+
 	// -- view plumbing ---------------------------------------------------------
 
 	async activateView() {
@@ -325,6 +553,56 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 }
 
 // ---------------------------------------------------------------------------
+// Add-task modal
+// ---------------------------------------------------------------------------
+
+class AddTaskModal extends Modal {
+	private dateKey: string;
+	private onSubmit: (text: string) => void;
+
+	constructor(app: App, dateKey: string, onSubmit: (text: string) => void) {
+		super(app);
+		this.dateKey = dateKey;
+		this.onSubmit = onSubmit;
+	}
+
+	onOpen() {
+		this.titleEl.setText(`Add task — ${this.dateKey}`);
+		let value = "";
+
+		const submit = () => {
+			const text = value.trim();
+			if (!text) return;
+			this.close();
+			this.onSubmit(text);
+		};
+
+		new Setting(this.contentEl).setName("Task").addText((text) => {
+			text.setPlaceholder("What needs doing?");
+			text.onChange((v) => (value = v));
+			text.inputEl.addEventListener("keydown", (e) => {
+				if (e.key === "Enter") {
+					// Enter that commits an IME composition (e.g. Chinese pinyin)
+					// must not submit the half-typed task
+					if (e.isComposing) return;
+					e.preventDefault();
+					submit();
+				}
+			});
+			window.setTimeout(() => text.inputEl.focus(), 0);
+		});
+
+		new Setting(this.contentEl).addButton((btn) =>
+			btn.setButtonText("Add task").setCta().onClick(submit)
+		);
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Heatmap view
 // ---------------------------------------------------------------------------
 
@@ -356,7 +634,14 @@ class HeatmapView extends ItemView {
 	render() {
 		const plugin = this.plugin;
 		const settings = plugin.settings;
-		const folder = settings.lastFolderFilter;
+		const folderPaths = plugin.allFolderPaths();
+		let folder = settings.lastFolderFilter;
+		if (folder && !folderPaths.includes(folder)) {
+			// the filtered folder was renamed or deleted; fall back to the vault
+			folder = "";
+			plugin.settings.lastFolderFilter = "";
+			void plugin.persist();
+		}
 
 		const root = this.contentEl;
 		root.empty();
@@ -382,7 +667,7 @@ class HeatmapView extends ItemView {
 		const controls = container.createDiv({ cls: "vah-controls" });
 		const dropdown = new DropdownComponent(controls);
 		dropdown.addOption("", "Whole vault");
-		for (const path of plugin.allFolderPaths()) {
+		for (const path of folderPaths) {
 			dropdown.addOption(path, path);
 		}
 		dropdown.setValue(folder);
@@ -403,6 +688,7 @@ class HeatmapView extends ItemView {
 
 		// -- grid ---------------------------------------------------------------
 		const today = startOfToday();
+		const todayKey = toDateKey(today);
 		const firstDow = settings.firstDayOfWeek;
 		const todayIndexInWeek = (today.getDay() - firstDow + 7) % 7;
 		const weeks = Math.max(4, Math.min(53, settings.weeksToShow));
@@ -436,22 +722,33 @@ class HeatmapView extends ItemView {
 			const weekEl = grid.createDiv({ cls: "vah-week" });
 			for (let row = 0; row < 7; row++) {
 				const cell = weekEl.createDiv({ cls: "vah-cell" });
-				if (cursor.getTime() > today.getTime()) {
+				const key = toDateKey(cursor);
+				const isFuture = cursor.getTime() > today.getTime();
+
+				if (settings.emptyColor) {
+					cell.style.backgroundColor = settings.emptyColor;
+				}
+
+				if (isFuture) {
 					cell.addClass("vah-future");
+					cell.setAttr("title", `${key} — upcoming`);
+					// planning ahead: future days still take tasks
+					this.attachCellMenu(cell, key);
+					cursor.setDate(cursor.getDate() + 1);
 					continue;
 				}
-				const key = toDateKey(cursor);
+
 				const count = plugin.countForDay(key, folder);
 				const level = plugin.intensityLevel(count);
 				if (level > 0) {
 					cell.style.backgroundColor = levelColor(settings.baseColor, level);
 				}
-				if (key === toDateKey(today)) cell.addClass("vah-today");
+				if (key === todayKey) cell.addClass("vah-today");
 
 				const noun = settings.metric === "edits" ? "edits" : "notes";
 				cell.setAttr("title", `${key} — ${count} ${noun}`);
-				const cellDate = key;
-				cell.addEventListener("click", () => this.showDetail(cellDate, folder));
+				cell.addEventListener("click", () => this.showDetail(key, folder));
+				this.attachCellMenu(cell, key);
 
 				cursor.setDate(cursor.getDate() + 1);
 			}
@@ -462,6 +759,9 @@ class HeatmapView extends ItemView {
 		legend.createSpan({ text: "Less" });
 		for (let level = 0; level <= 4; level++) {
 			const swatch = legend.createDiv({ cls: "vah-cell vah-legend-swatch" });
+			if (level === 0 && settings.emptyColor) {
+				swatch.style.backgroundColor = settings.emptyColor;
+			}
 			if (level > 0) {
 				swatch.style.backgroundColor = levelColor(settings.baseColor, level);
 			}
@@ -473,6 +773,31 @@ class HeatmapView extends ItemView {
 		// show the most recent weeks first
 		requestAnimationFrame(() => {
 			scroll.scrollLeft = scroll.scrollWidth;
+		});
+	}
+
+	/** Right-click menu: add a task to / open the day's reflection note. */
+	private attachCellMenu(cell: HTMLElement, dateKey: string) {
+		cell.addEventListener("contextmenu", (e) => {
+			e.preventDefault();
+			const menu = new Menu();
+			menu.addItem((item) =>
+				item
+					.setTitle("Add task to daily reflection…")
+					.setIcon("check-square")
+					.onClick(() => {
+						new AddTaskModal(this.plugin.app, dateKey, (text) => {
+							void this.plugin.addTaskToDailyReflection(dateKey, text);
+						}).open();
+					})
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Open daily reflection note")
+					.setIcon("file-text")
+					.onClick(() => void this.plugin.openDailyReflection(dateKey))
+			);
+			menu.showAtMouseEvent(e);
 		});
 	}
 
@@ -548,15 +873,75 @@ class HeatmapSettingTab extends PluginSettingTab {
 			this.plugin.renderAllViews();
 		};
 
+		new Setting(containerEl).setName("Appearance").setHeading();
+
+		let baseColorPicker: ColorComponent | null = null;
+		let baseColorText: TextComponent | null = null;
+		// ColorComponent.setValue re-fires onChange, so programmatic syncs
+		// between the picker and the text field must not echo back and
+		// clobber what the user is typing
+		let syncingBaseColor = false;
+
 		new Setting(containerEl)
 			.setName("Square color")
-			.setDesc("Base color of the heatmap squares. Intensity is derived from it.")
-			.addColorPicker((picker) =>
-				picker.setValue(this.plugin.settings.baseColor).onChange(async (value) => {
-					this.plugin.settings.baseColor = value;
-					await save();
-				})
-			);
+			.setDesc(
+				"Base color of the heatmap squares. Pick it, or type an RGB value like 64, 196, 99 (or a hex code like #40c463)."
+			)
+			.addColorPicker((picker) => {
+				baseColorPicker = picker;
+				picker
+					.setValue(this.plugin.settings.baseColor)
+					.onChange(async (value) => {
+						if (syncingBaseColor || value === this.plugin.settings.baseColor)
+							return;
+						this.plugin.settings.baseColor = value;
+						baseColorText?.setValue(hexToRgbString(value));
+						await save();
+					});
+			})
+			.addText((text) => {
+				baseColorText = text;
+				text
+					.setPlaceholder("64, 196, 99")
+					.setValue(hexToRgbString(this.plugin.settings.baseColor))
+					.onChange(async (value) => {
+						const hex = parseColorInput(value);
+						if (!hex || hex === this.plugin.settings.baseColor) return;
+						this.plugin.settings.baseColor = hex;
+						syncingBaseColor = true;
+						baseColorPicker?.setValue(hex);
+						syncingBaseColor = false;
+						await save();
+					});
+				text.inputEl.addClass("vah-rgb-input");
+			});
+
+		new Setting(containerEl)
+			.setName("Empty square color")
+			.setDesc(
+				"Color for days without activity, as RGB or hex. Leave blank to use the theme default."
+			)
+			.addText((text) => {
+				text
+					.setPlaceholder("theme default")
+					.setValue(
+						this.plugin.settings.emptyColor
+							? hexToRgbString(this.plugin.settings.emptyColor)
+							: ""
+					)
+					.onChange(async (value) => {
+						if (!value.trim()) {
+							this.plugin.settings.emptyColor = "";
+							await save();
+							return;
+						}
+						const hex = parseColorInput(value);
+						if (!hex) return;
+						this.plugin.settings.emptyColor = hex;
+						await save();
+					});
+				text.inputEl.addClass("vah-rgb-input");
+			});
 
 		new Setting(containerEl)
 			.setName("Metric")
@@ -622,6 +1007,8 @@ class HeatmapSettingTab extends PluginSettingTab {
 					})
 			);
 
+		new Setting(containerEl).setName("Tracking").setHeading();
+
 		new Setting(containerEl)
 			.setName("Excluded folders")
 			.setDesc(
@@ -636,6 +1023,55 @@ class HeatmapSettingTab extends PluginSettingTab {
 							.split("\n")
 							.map((s) => s.trim().replace(/^\/+|\/+$/g, ""))
 							.filter((s) => s.length > 0);
+						await save();
+					})
+			);
+
+		new Setting(containerEl).setName("Daily reflection notes").setHeading();
+
+		new Setting(containerEl)
+			.setName("Reflection folder")
+			.setDesc(
+				"Folder where daily reflection notes are created when you right-click a square. Leave blank for the vault root."
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("Daily reflection")
+					.setValue(this.plugin.settings.reflectionFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.reflectionFolder = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Note name format")
+			.setDesc(
+				`Date format for the note file name (moment.js syntax). "YYYY-MM-DD" → ${momentFn().format(
+					"YYYY-MM-DD"
+				)}.md`
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("YYYY-MM-DD")
+					.setValue(this.plugin.settings.dailyNoteFormat)
+					.onChange(async (value) => {
+						this.plugin.settings.dailyNoteFormat = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Tasks heading")
+			.setDesc(
+				'Heading the task is inserted under, e.g. "## Tasks". Created if missing. Leave blank to append tasks at the end of the note.'
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("## Tasks")
+					.setValue(this.plugin.settings.taskHeading)
+					.onChange(async (value) => {
+						this.plugin.settings.taskHeading = value;
 						await save();
 					})
 			);

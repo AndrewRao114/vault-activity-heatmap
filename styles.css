@@ -103,7 +103,7 @@
 }
 
 .vah-cell.vah-future {
-	background-color: transparent;
+	opacity: 0.35;
 	cursor: default;
 }
 
@@ -177,4 +177,11 @@
 .vah-detail-edits {
 	color: var(--text-faint);
 	flex: 0 0 auto;
+}
+
+/* settings */
+.vah-rgb-input {
+	width: 130px;
+	font-family: var(--font-monospace);
+	font-size: 0.85em;
 }

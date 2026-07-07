@@ -18,9 +18,17 @@ and it turns dark. Just like a commit graph, but for your vault.
   of memo apps like Plidezus.
 - **Day details** — click any square to list the notes you touched that day;
   click a note to open it.
-- **Configurable** — square color (color picker), intensity thresholds
-  (default `1, 3, 6, 10`), metric (unique notes vs. total edits), weeks shown,
-  week start day, and excluded folders (e.g. templates).
+- **Right-click to plan** — right-click any day square to add a task
+  (`- [ ] …`) into that day's **daily reflection note**, created automatically
+  in a configurable folder/filename format under a configurable heading.
+  The remaining days of the current week are right-clickable too, so you can
+  schedule tasks ahead. There's also a command:
+  *"Add task to today's daily reflection"*.
+- **Configurable colors, in RGB** — pick the square color with a color picker
+  or type an exact `R, G, B` (or hex) value; optionally recolor empty squares
+  too. Intensity thresholds (default `1, 3, 6, 10`), metric (unique notes vs.
+  total edits), weeks shown, week start day, and excluded folders are all
+  configurable as well.
 - **Backfill** — seed the graph from the created/modified dates of the notes
   you already have, so it isn't empty on day one.
 
@@ -55,6 +63,21 @@ day. With the default thresholds `1, 3, 6, 10`:
 
 Change the thresholds, the color, or switch the metric to *total edits per day*
 in **Settings → Vault Activity Heatmap**.
+
+## Daily reflection tasks
+
+Right-click a square → **Add task to daily reflection…** → type the task.
+It lands in `<Reflection folder>/<date>.md` under the configured heading
+(default `## Tasks`), which is created if missing:
+
+```markdown
+## Tasks
+- [ ] review chemistry flashcards
+```
+
+Configure the folder (default `Daily reflection`), the filename date format
+(moment.js syntax, default `YYYY-MM-DD`), and the heading in settings — so it
+can point at an existing daily-notes setup.
 
 ## Development
 
