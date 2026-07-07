@@ -179,6 +179,149 @@
 	flex: 0 0 auto;
 }
 
+/* detail sections */
+.vah-section {
+	margin-top: 12px;
+}
+
+.vah-section-title {
+	font-size: 0.68em;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--text-muted);
+	margin-bottom: 6px;
+}
+
+/* To Do-style tasks */
+.vah-task-add {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 8px;
+	border-radius: 6px;
+	background: var(--background-secondary);
+	margin-bottom: 6px;
+}
+
+input.vah-task-input {
+	flex: 1;
+	border: none;
+	background: transparent;
+	padding: 0;
+	font-size: 0.9em;
+}
+
+input.vah-task-input:focus {
+	box-shadow: none;
+	outline: none;
+}
+
+.vah-task-list {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.vah-task-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 8px;
+	border-radius: 6px;
+	background: var(--background-secondary);
+	font-size: 0.9em;
+}
+
+.vah-task-circle {
+	width: 16px;
+	height: 16px;
+	flex: 0 0 16px;
+	border-radius: 50%;
+	border: 1.5px solid var(--text-muted);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 10px;
+	line-height: 1;
+	cursor: pointer;
+	color: transparent;
+	box-sizing: border-box;
+}
+
+.vah-task-circle:hover {
+	color: var(--text-muted);
+}
+
+.vah-task-circle-done {
+	background: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.vah-task-circle-done:hover {
+	color: var(--text-on-accent);
+}
+
+.vah-task-add-circle {
+	border: none;
+	color: var(--text-accent);
+	font-size: 14px;
+	cursor: default;
+}
+
+.vah-task-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.vah-task-done .vah-task-text {
+	text-decoration: line-through;
+	color: var(--text-muted);
+}
+
+.vah-task-done-header {
+	font-size: 0.8em;
+	color: var(--text-muted);
+	cursor: pointer;
+	margin: 8px 0 4px;
+}
+
+/* edit timeline */
+.vah-timeline {
+	border-left: 2px solid var(--background-modifier-border);
+	margin-left: 5px;
+	padding-left: 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.vah-tl-item {
+	position: relative;
+}
+
+.vah-tl-dot {
+	position: absolute;
+	left: -19px;
+	top: 4px;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--background-primary);
+	border: 2px solid var(--text-faint);
+	box-sizing: border-box;
+}
+
+.vah-tl-title {
+	font-size: 0.85em;
+}
+
+.vah-tl-meta {
+	font-size: 0.75em;
+	color: var(--text-muted);
+}
+
 /* settings */
 .vah-rgb-input {
 	width: 130px;

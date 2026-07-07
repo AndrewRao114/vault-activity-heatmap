@@ -16,8 +16,13 @@ and it turns dark. Just like a commit graph, but for your vault.
   `Personal Daily Tracker`) from the dropdown at the top.
 - **Stats header** — total notes, active days, and current streak, in the style
   of memo apps like Plidezus.
-- **Day details** — click any square to list the notes you touched that day;
-  click a note to open it.
+- **Day details** — click any square (today shows by default): a Microsoft
+  To Do-style task list backed by that day's reflection note (add tasks
+  inline, check them off — the `- [ ]` in the note is updated), the notes you
+  touched, and an **edit timeline** showing when each note was worked on and
+  by how much (e.g. `14:31–14:45 · +240 B · 6 saves`). Rapid saves merge into
+  one session (gap configurable); only times and sizes are stored, never
+  content.
 - **Right-click to plan** — right-click any day square to add a task
   (`- [ ] …`) into that day's **daily reflection note**, created automatically
   in a configurable folder/filename format under a configurable heading.

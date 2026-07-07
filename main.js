@@ -37,7 +37,10 @@ var DEFAULT_SETTINGS = {
   lastFolderFilter: "",
   reflectionFolder: "Daily reflection",
   dailyNoteFormat: "YYYY-MM-DD",
-  taskHeading: "## Tasks"
+  taskHeading: "## Tasks",
+  sessionGapMinutes: 15,
+  showTasks: true,
+  showTimeline: true
 };
 var DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 var MONTH_NAMES = [
@@ -99,6 +102,15 @@ function levelColor(baseColor, level) {
 function isUnderFolder(path, folder) {
   if (!folder) return true;
   return path.startsWith(folder + "/");
+}
+function formatClockTime(ms) {
+  const d = new Date(ms);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+function formatByteDelta(delta) {
+  const sign = delta > 0 ? "+" : "\u2212";
+  const abs = Math.abs(delta);
+  return sign + (abs < 1024 ? `${abs} B` : `${(abs / 1024).toFixed(1)} KB`);
 }
 function normalizeHeadingText(text) {
   return text.replace(/\s+#+\s*$/, "").trim().toLowerCase();
@@ -182,6 +194,8 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian.Plugin {
     this.activity = { days: {} };
     this.requestSave = (0, import_obsidian.debounce)(() => void this.persist(), 3e3, true);
     this.refreshViews = (0, import_obsidian.debounce)(() => this.renderAllViews(), 600, true);
+    /** Last known file sizes, for timeline byte deltas. */
+    this.lastSizes = /* @__PURE__ */ new Map();
   }
   async onload() {
     await this.loadPersisted();
@@ -210,8 +224,11 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian.Plugin {
     });
     this.addSettingTab(new HeatmapSettingTab(this.app, this));
     this.app.workspace.onLayoutReady(() => {
+      for (const f of this.app.vault.getMarkdownFiles()) {
+        this.lastSizes.set(f.path, f.stat.size);
+      }
       this.registerEvent(
-        this.app.vault.on("create", (f) => this.recordActivity(f))
+        this.app.vault.on("create", (f) => this.recordActivity(f, true))
       );
       this.registerEvent(
         this.app.vault.on("modify", (f) => this.recordActivity(f))
@@ -244,13 +261,40 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian.Plugin {
     }
     return true;
   }
-  recordActivity(file) {
+  recordActivity(file, isCreate = false) {
     var _a;
     if (!this.isTracked(file)) return;
+    const now = Date.now();
     const key = toDateKey(/* @__PURE__ */ new Date());
     const day = (_a = this.activity.days)[key] ?? (_a[key] = { edits: 0, files: {} });
     day.edits += 1;
     day.files[file.path] = (day.files[file.path] ?? 0) + 1;
+    const newSize = file.stat.size;
+    const prevSize = this.lastSizes.get(file.path);
+    const delta = prevSize === void 0 ? isCreate ? newSize : 0 : newSize - prevSize;
+    this.lastSizes.set(file.path, newSize);
+    const sessions = day.sessions ?? (day.sessions = []);
+    const gapMs = Math.max(1, this.settings.sessionGapMinutes) * 6e4;
+    let last;
+    for (let i = sessions.length - 1; i >= 0; i--) {
+      if (sessions[i].f === file.path) {
+        last = sessions[i];
+        break;
+      }
+    }
+    if (last && !isCreate && now - last.e <= gapMs) {
+      last.e = now;
+      last.n += 1;
+      last.d += delta;
+    } else if (sessions.length < 300) {
+      const rec = { f: file.path, s: now, e: now, n: 1, d: delta };
+      if (isCreate) rec.k = "create";
+      sessions.push(rec);
+    } else if (last) {
+      last.e = now;
+      last.n += 1;
+      last.d += delta;
+    }
     this.requestSave();
     this.refreshViews();
   }
@@ -265,6 +309,17 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian.Plugin {
         delete day.files[oldPath];
         changed = true;
       }
+      for (const session of day.sessions ?? []) {
+        if (session.f === oldPath) {
+          session.f = file.path;
+          changed = true;
+        }
+      }
+    }
+    const size = this.lastSizes.get(oldPath);
+    if (size !== void 0) {
+      this.lastSizes.delete(oldPath);
+      this.lastSizes.set(file.path, size);
     }
     if (changed) {
       this.requestSave();
@@ -368,6 +423,34 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian.Plugin {
     if (!file) return;
     await this.app.workspace.getLeaf(false).openFile(file);
   }
+  /** Parse the checkbox tasks of a day's reflection note. */
+  async readDailyTasks(dateKey) {
+    const path = this.dailyNotePath(dateKey);
+    const af = this.app.vault.getAbstractFileByPath(path);
+    if (!(af instanceof import_obsidian.TFile)) return { file: null, tasks: [] };
+    const content = await this.app.vault.cachedRead(af);
+    const lines = content.split("\n");
+    const skip = nonHeadingLines(lines);
+    const tasks = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (skip[i]) continue;
+      const m = lines[i].match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
+      if (m) {
+        tasks.push({ line: i, raw: lines[i], text: m[2], done: m[1] !== " " });
+      }
+    }
+    return { file: af, tasks };
+  }
+  /** Check or uncheck a task line in a reflection note. */
+  async toggleTask(file, task, done) {
+    await this.app.vault.process(file, (content) => {
+      const lines = content.split("\n");
+      const i = lines[task.line] === task.raw ? task.line : lines.indexOf(task.raw);
+      if (i === -1) return content;
+      lines[i] = done ? lines[i].replace(/^(\s*[-*]\s+)\[ \]/, "$1[x]") : lines[i].replace(/^(\s*[-*]\s+)\[[xX]\]/, "$1[ ]");
+      return lines.join("\n");
+    });
+  }
   // -- view plumbing ---------------------------------------------------------
   async activateView() {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_HEATMAP);
@@ -469,6 +552,10 @@ var HeatmapView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.detailEl = null;
+    this.lastDetailKey = null;
+    this.completedOpen = false;
+    this.detailToken = 0;
+    this.pendingRender = false;
     this.plugin = plugin;
   }
   getViewType() {
@@ -484,6 +571,12 @@ var HeatmapView = class extends import_obsidian.ItemView {
     this.render();
   }
   render() {
+    const active = document.activeElement;
+    if (active instanceof HTMLInputElement && this.contentEl.contains(active)) {
+      this.pendingRender = true;
+      return;
+    }
+    this.pendingRender = false;
     const plugin = this.plugin;
     const settings = plugin.settings;
     const folderPaths = plugin.allFolderPaths();
@@ -574,7 +667,7 @@ var HeatmapView = class extends import_obsidian.ItemView {
         if (key === todayKey) cell.addClass("vah-today");
         const noun = settings.metric === "edits" ? "edits" : "notes";
         cell.setAttr("title", `${key} \u2014 ${count} ${noun}`);
-        cell.addEventListener("click", () => this.showDetail(key, folder));
+        cell.addEventListener("click", () => void this.showDetail(key, folder));
         this.attachCellMenu(cell, key);
         cursor.setDate(cursor.getDate() + 1);
       }
@@ -592,6 +685,7 @@ var HeatmapView = class extends import_obsidian.ItemView {
     }
     legend.createSpan({ text: "More" });
     this.detailEl = container.createDiv({ cls: "vah-detail" });
+    void this.showDetail(this.lastDetailKey ?? todayKey, folder);
     requestAnimationFrame(() => {
       scroll.scrollLeft = scroll.scrollWidth;
     });
@@ -632,31 +726,134 @@ var HeatmapView = class extends import_obsidian.ItemView {
     }
     return streak;
   }
-  showDetail(key, folder) {
+  async showDetail(key, folder, focusAddInput = false) {
     if (!this.detailEl) return;
+    const token = ++this.detailToken;
+    this.lastDetailKey = key;
+    const daily = this.plugin.settings.showTasks ? await this.plugin.readDailyTasks(key) : null;
+    if (token !== this.detailToken || !this.detailEl) return;
     const detail = this.detailEl;
     detail.empty();
     const files = this.plugin.filesForDay(key, folder);
     detail.createEl("h6", {
       text: `${key} \u2014 ${files.length} note${files.length === 1 ? "" : "s"}`
     });
-    if (files.length === 0) {
+    if (daily) this.renderTasks(detail, key, folder, daily, focusAddInput);
+    if (files.length > 0) {
+      const section = detail.createDiv({ cls: "vah-section" });
+      section.createDiv({ cls: "vah-section-title", text: "Notes edited" });
+      const list = section.createDiv({ cls: "vah-detail-list" });
+      for (const [path, edits] of files) {
+        const row = list.createDiv({ cls: "vah-detail-row" });
+        const link = row.createSpan({ cls: "vah-detail-link" });
+        const file = this.plugin.app.vault.getAbstractFileByPath(path);
+        link.setText(path.replace(/\.md$/, ""));
+        if (file instanceof import_obsidian.TFile) {
+          link.addClass("vah-detail-link-live");
+          link.addEventListener("click", () => {
+            void this.plugin.app.workspace.getLeaf(false).openFile(file);
+          });
+        }
+        row.createSpan({ cls: "vah-detail-edits", text: `\xD7${edits}` });
+      }
+    } else if (!daily) {
       detail.createDiv({ cls: "vah-detail-empty", text: "No activity." });
-      return;
     }
-    const list = detail.createDiv({ cls: "vah-detail-list" });
-    for (const [path, edits] of files) {
-      const row = list.createDiv({ cls: "vah-detail-row" });
-      const link = row.createSpan({ cls: "vah-detail-link" });
-      const file = this.plugin.app.vault.getAbstractFileByPath(path);
-      link.setText(path.replace(/\.md$/, ""));
-      if (file instanceof import_obsidian.TFile) {
-        link.addClass("vah-detail-link-live");
-        link.addEventListener("click", () => {
-          void this.plugin.app.workspace.getLeaf(false).openFile(file);
+    if (this.plugin.settings.showTimeline) {
+      this.renderTimeline(detail, key, folder);
+    }
+  }
+  /** Microsoft To Do-style task list backed by the day's reflection note. */
+  renderTasks(detail, key, folder, daily, focusAddInput) {
+    const plugin = this.plugin;
+    const section = detail.createDiv({ cls: "vah-section" });
+    section.createDiv({ cls: "vah-section-title", text: "Tasks" });
+    const addRow = section.createDiv({ cls: "vah-task-add" });
+    addRow.createSpan({ cls: "vah-task-circle vah-task-add-circle", text: "+" });
+    const input = addRow.createEl("input", {
+      cls: "vah-task-input",
+      type: "text",
+      placeholder: "Add a task"
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing) return;
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      void plugin.addTaskToDailyReflection(key, text).then(() => this.showDetail(key, folder, true));
+    });
+    input.addEventListener("blur", () => {
+      if (this.pendingRender) this.render();
+    });
+    if (focusAddInput) window.setTimeout(() => input.focus(), 0);
+    const renderRow = (parent, task) => {
+      const row = parent.createDiv({
+        cls: "vah-task-row" + (task.done ? " vah-task-done" : "")
+      });
+      const circle = row.createSpan({
+        cls: "vah-task-circle" + (task.done ? " vah-task-circle-done" : "")
+      });
+      circle.setText(task.done ? "\u2713" : "");
+      circle.setAttr("title", task.done ? "Mark as not done" : "Mark as done");
+      circle.addEventListener("click", () => {
+        const file = daily.file;
+        if (!file) return;
+        void plugin.toggleTask(file, task, !task.done).then(() => this.showDetail(key, folder));
+      });
+      row.createSpan({ cls: "vah-task-text", text: task.text });
+    };
+    const open = daily.tasks.filter((t) => !t.done);
+    const done = daily.tasks.filter((t) => t.done);
+    if (open.length > 0) {
+      const list = section.createDiv({ cls: "vah-task-list" });
+      for (const t of open) renderRow(list, t);
+    } else if (daily.tasks.length === 0) {
+      section.createDiv({
+        cls: "vah-detail-empty",
+        text: daily.file ? "No tasks in this day's reflection note." : "No reflection note yet \u2014 add a task to create one."
+      });
+    }
+    if (done.length > 0) {
+      const header = section.createDiv({ cls: "vah-task-done-header" });
+      header.setText(
+        `${this.completedOpen ? "\u25BE" : "\u25B8"} Completed ${done.length}`
+      );
+      header.addEventListener("click", () => {
+        this.completedOpen = !this.completedOpen;
+        void this.showDetail(key, folder);
+      });
+      if (this.completedOpen) {
+        const list = section.createDiv({ cls: "vah-task-list" });
+        for (const t of done) renderRow(list, t);
+      }
+    }
+  }
+  /** Chronological trail of the day's editing sessions. */
+  renderTimeline(detail, key, folder) {
+    const sessions = (this.plugin.activity.days[key]?.sessions ?? []).filter((s) => isUnderFolder(s.f, folder)).sort((a, b) => a.s - b.s);
+    if (sessions.length === 0) return;
+    const section = detail.createDiv({ cls: "vah-section" });
+    section.createDiv({ cls: "vah-section-title", text: "Timeline" });
+    const list = section.createDiv({ cls: "vah-timeline" });
+    for (const s of sessions) {
+      const item = list.createDiv({ cls: "vah-tl-item" });
+      item.createDiv({ cls: "vah-tl-dot" });
+      const name = (s.f.split("/").pop() ?? s.f).replace(/\.md$/, "");
+      const title = item.createDiv({ cls: "vah-tl-title" });
+      title.setText(s.k === "create" ? `${name} \u2014 created` : name);
+      const target = this.plugin.app.vault.getAbstractFileByPath(s.f);
+      if (target instanceof import_obsidian.TFile) {
+        title.addClass("vah-detail-link-live");
+        title.addEventListener("click", () => {
+          void this.plugin.app.workspace.getLeaf(false).openFile(target);
         });
       }
-      row.createSpan({ cls: "vah-detail-edits", text: `\xD7${edits}` });
+      const parts = [
+        s.e - s.s >= 6e4 ? `${formatClockTime(s.s)}\u2013${formatClockTime(s.e)}` : formatClockTime(s.s)
+      ];
+      if (s.d !== 0) parts.push(formatByteDelta(s.d));
+      if (s.n > 1) parts.push(`${s.n} saves`);
+      item.createDiv({ cls: "vah-tl-meta", text: parts.join(" \xB7 ") });
     }
   }
 };
@@ -782,6 +979,31 @@ var HeatmapSettingTab = class extends import_obsidian.PluginSettingTab {
     ).addText(
       (text) => text.setPlaceholder("## Tasks").setValue(this.plugin.settings.taskHeading).onChange(async (value) => {
         this.plugin.settings.taskHeading = value;
+        await save();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Day detail").setHeading();
+    new import_obsidian.Setting(containerEl).setName("Show tasks").setDesc(
+      "To Do-style task list for the selected day, backed by its daily reflection note."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.showTasks).onChange(async (value) => {
+        this.plugin.settings.showTasks = value;
+        await save();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Show edit timeline").setDesc(
+      "Chronological trail of when each note was edited that day and by how much."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.showTimeline).onChange(async (value) => {
+        this.plugin.settings.showTimeline = value;
+        await save();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Timeline session gap").setDesc(
+      "Saves of the same note within this many minutes merge into one timeline entry."
+    ).addSlider(
+      (slider) => slider.setLimits(5, 60, 5).setValue(this.plugin.settings.sessionGapMinutes).setDynamicTooltip().onChange(async (value) => {
+        this.plugin.settings.sessionGapMinutes = value;
         await save();
       })
     );

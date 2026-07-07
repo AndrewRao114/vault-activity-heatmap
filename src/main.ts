@@ -31,11 +31,29 @@ const momentFn = moment as unknown as (
 // Data model
 // ---------------------------------------------------------------------------
 
+/** One coalesced editing session of a single note within a day. */
+interface SessionRecord {
+	/** file path */
+	f: string;
+	/** epoch ms of the first edit in the session */
+	s: number;
+	/** epoch ms of the latest edit in the session */
+	e: number;
+	/** number of save events merged into this session */
+	n: number;
+	/** net byte delta of the file across the session */
+	d: number;
+	/** set when the session started by creating the note */
+	k?: "create";
+}
+
 interface DayRecord {
 	/** Total number of save/edit events recorded that day. */
 	edits: number;
 	/** Map of file path -> number of edits to that file that day. */
 	files: Record<string, number>;
+	/** Chronological editing sessions (absent on days recorded before v1.2). */
+	sessions?: SessionRecord[];
 }
 
 interface ActivityData {
@@ -64,6 +82,12 @@ interface HeatmapSettings {
 	dailyNoteFormat: string;
 	/** Heading that tasks are appended under; empty = end of note. */
 	taskHeading: string;
+	/** Minutes of quiet before edits to the same note start a new timeline session. */
+	sessionGapMinutes: number;
+	/** Show the To Do-style task list in the day detail panel. */
+	showTasks: boolean;
+	/** Show the edit timeline in the day detail panel. */
+	showTimeline: boolean;
 }
 
 const DEFAULT_SETTINGS: HeatmapSettings = {
@@ -78,6 +102,9 @@ const DEFAULT_SETTINGS: HeatmapSettings = {
 	reflectionFolder: "Daily reflection",
 	dailyNoteFormat: "YYYY-MM-DD",
 	taskHeading: "## Tasks",
+	sessionGapMinutes: 15,
+	showTasks: true,
+	showTimeline: true,
 };
 
 interface PersistedData {
@@ -158,6 +185,21 @@ function levelColor(baseColor: string, level: number): string {
 function isUnderFolder(path: string, folder: string): boolean {
 	if (!folder) return true;
 	return path.startsWith(folder + "/");
+}
+
+function formatClockTime(ms: number): string {
+	const d = new Date(ms);
+	return (
+		String(d.getHours()).padStart(2, "0") +
+		":" +
+		String(d.getMinutes()).padStart(2, "0")
+	);
+}
+
+function formatByteDelta(delta: number): string {
+	const sign = delta > 0 ? "+" : "−";
+	const abs = Math.abs(delta);
+	return sign + (abs < 1024 ? `${abs} B` : `${(abs / 1024).toFixed(1)} KB`);
 }
 
 /** Normalize heading text for comparison; trailing hashes of closed ATX headings ("## Tasks ##") are not part of the text. */
@@ -251,6 +293,17 @@ function insertUnderHeading(content: string, heading: string, line: string): str
 	return lines.join("\n");
 }
 
+/** A checkbox task parsed out of a daily reflection note. */
+interface DailyTask {
+	/** zero-based line number in the note */
+	line: number;
+	/** raw line, used to re-locate the task if the note shifted */
+	raw: string;
+	/** task text without the checkbox */
+	text: string;
+	done: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -261,6 +314,8 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 
 	private requestSave = debounce(() => void this.persist(), 3000, true);
 	private refreshViews = debounce(() => this.renderAllViews(), 600, true);
+	/** Last known file sizes, for timeline byte deltas. */
+	private lastSizes = new Map<string, number>();
 
 	async onload() {
 		await this.loadPersisted();
@@ -298,8 +353,11 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 		// Vault emits `create` for every existing file during startup, so only
 		// listen once the initial layout is ready.
 		this.app.workspace.onLayoutReady(() => {
+			for (const f of this.app.vault.getMarkdownFiles()) {
+				this.lastSizes.set(f.path, f.stat.size);
+			}
 			this.registerEvent(
-				this.app.vault.on("create", (f) => this.recordActivity(f))
+				this.app.vault.on("create", (f) => this.recordActivity(f, true))
 			);
 			this.registerEvent(
 				this.app.vault.on("modify", (f) => this.recordActivity(f))
@@ -339,12 +397,44 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 		return true;
 	}
 
-	private recordActivity(file: TAbstractFile) {
+	private recordActivity(file: TAbstractFile, isCreate = false) {
 		if (!this.isTracked(file)) return;
+		const now = Date.now();
 		const key = toDateKey(new Date());
 		const day = (this.activity.days[key] ??= { edits: 0, files: {} });
 		day.edits += 1;
 		day.files[file.path] = (day.files[file.path] ?? 0) + 1;
+
+		// timeline: merge rapid saves of the same note into one session
+		const newSize = file.stat.size;
+		const prevSize = this.lastSizes.get(file.path);
+		const delta = prevSize === undefined ? (isCreate ? newSize : 0) : newSize - prevSize;
+		this.lastSizes.set(file.path, newSize);
+
+		const sessions = (day.sessions ??= []);
+		const gapMs = Math.max(1, this.settings.sessionGapMinutes) * 60_000;
+		let last: SessionRecord | undefined;
+		for (let i = sessions.length - 1; i >= 0; i--) {
+			if (sessions[i].f === file.path) {
+				last = sessions[i];
+				break;
+			}
+		}
+		if (last && !isCreate && now - last.e <= gapMs) {
+			last.e = now;
+			last.n += 1;
+			last.d += delta;
+		} else if (sessions.length < 300) {
+			const rec: SessionRecord = { f: file.path, s: now, e: now, n: 1, d: delta };
+			if (isCreate) rec.k = "create";
+			sessions.push(rec);
+		} else if (last) {
+			// day is absurdly busy; keep extending rather than growing the list
+			last.e = now;
+			last.n += 1;
+			last.d += delta;
+		}
+
 		this.requestSave();
 		this.refreshViews();
 	}
@@ -360,6 +450,17 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 				delete day.files[oldPath];
 				changed = true;
 			}
+			for (const session of day.sessions ?? []) {
+				if (session.f === oldPath) {
+					session.f = file.path;
+					changed = true;
+				}
+			}
+		}
+		const size = this.lastSizes.get(oldPath);
+		if (size !== undefined) {
+			this.lastSizes.delete(oldPath);
+			this.lastSizes.set(file.path, size);
 		}
 		if (changed) {
 			this.requestSave();
@@ -476,6 +577,41 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 		const file = await this.getOrCreateDailyNote(dateKey);
 		if (!file) return;
 		await this.app.workspace.getLeaf(false).openFile(file);
+	}
+
+	/** Parse the checkbox tasks of a day's reflection note. */
+	async readDailyTasks(
+		dateKey: string
+	): Promise<{ file: TFile | null; tasks: DailyTask[] }> {
+		const path = this.dailyNotePath(dateKey);
+		const af = this.app.vault.getAbstractFileByPath(path);
+		if (!(af instanceof TFile)) return { file: null, tasks: [] };
+		const content = await this.app.vault.cachedRead(af);
+		const lines = content.split("\n");
+		const skip = nonHeadingLines(lines); // no tasks from frontmatter/code blocks
+		const tasks: DailyTask[] = [];
+		for (let i = 0; i < lines.length; i++) {
+			if (skip[i]) continue;
+			const m = lines[i].match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
+			if (m) {
+				tasks.push({ line: i, raw: lines[i], text: m[2], done: m[1] !== " " });
+			}
+		}
+		return { file: af, tasks };
+	}
+
+	/** Check or uncheck a task line in a reflection note. */
+	async toggleTask(file: TFile, task: DailyTask, done: boolean) {
+		await this.app.vault.process(file, (content) => {
+			const lines = content.split("\n");
+			const i =
+				lines[task.line] === task.raw ? task.line : lines.indexOf(task.raw);
+			if (i === -1) return content; // task edited away meanwhile
+			lines[i] = done
+				? lines[i].replace(/^(\s*[-*]\s+)\[ \]/, "$1[x]")
+				: lines[i].replace(/^(\s*[-*]\s+)\[[xX]\]/, "$1[ ]");
+			return lines.join("\n");
+		});
 	}
 
 	// -- view plumbing ---------------------------------------------------------
@@ -609,6 +745,10 @@ class AddTaskModal extends Modal {
 class HeatmapView extends ItemView {
 	private plugin: VaultActivityHeatmapPlugin;
 	private detailEl: HTMLElement | null = null;
+	private lastDetailKey: string | null = null;
+	private completedOpen = false;
+	private detailToken = 0;
+	private pendingRender = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultActivityHeatmapPlugin) {
 		super(leaf);
@@ -632,6 +772,15 @@ class HeatmapView extends ItemView {
 	}
 
 	render() {
+		// re-rendering while the user is typing in one of our inputs would
+		// destroy the input under their cursor; retry on blur instead
+		const active = document.activeElement;
+		if (active instanceof HTMLInputElement && this.contentEl.contains(active)) {
+			this.pendingRender = true;
+			return;
+		}
+		this.pendingRender = false;
+
 		const plugin = this.plugin;
 		const settings = plugin.settings;
 		const folderPaths = plugin.allFolderPaths();
@@ -747,7 +896,7 @@ class HeatmapView extends ItemView {
 
 				const noun = settings.metric === "edits" ? "edits" : "notes";
 				cell.setAttr("title", `${key} — ${count} ${noun}`);
-				cell.addEventListener("click", () => this.showDetail(key, folder));
+				cell.addEventListener("click", () => void this.showDetail(key, folder));
 				this.attachCellMenu(cell, key);
 
 				cursor.setDate(cursor.getDate() + 1);
@@ -769,6 +918,7 @@ class HeatmapView extends ItemView {
 		legend.createSpan({ text: "More" });
 
 		this.detailEl = container.createDiv({ cls: "vah-detail" });
+		void this.showDetail(this.lastDetailKey ?? todayKey, folder);
 
 		// show the most recent weeks first
 		requestAnimationFrame(() => {
@@ -822,8 +972,16 @@ class HeatmapView extends ItemView {
 		return streak;
 	}
 
-	private showDetail(key: string, folder: string) {
+	private async showDetail(key: string, folder: string, focusAddInput = false) {
 		if (!this.detailEl) return;
+		const token = ++this.detailToken;
+		this.lastDetailKey = key;
+
+		const daily = this.plugin.settings.showTasks
+			? await this.plugin.readDailyTasks(key)
+			: null;
+		// a newer showDetail/render superseded this one while we were reading
+		if (token !== this.detailToken || !this.detailEl) return;
 		const detail = this.detailEl;
 		detail.empty();
 
@@ -831,23 +989,149 @@ class HeatmapView extends ItemView {
 		detail.createEl("h6", {
 			text: `${key} — ${files.length} note${files.length === 1 ? "" : "s"}`,
 		});
-		if (files.length === 0) {
+
+		if (daily) this.renderTasks(detail, key, folder, daily, focusAddInput);
+
+		if (files.length > 0) {
+			const section = detail.createDiv({ cls: "vah-section" });
+			section.createDiv({ cls: "vah-section-title", text: "Notes edited" });
+			const list = section.createDiv({ cls: "vah-detail-list" });
+			for (const [path, edits] of files) {
+				const row = list.createDiv({ cls: "vah-detail-row" });
+				const link = row.createSpan({ cls: "vah-detail-link" });
+				const file = this.plugin.app.vault.getAbstractFileByPath(path);
+				link.setText(path.replace(/\.md$/, ""));
+				if (file instanceof TFile) {
+					link.addClass("vah-detail-link-live");
+					link.addEventListener("click", () => {
+						void this.plugin.app.workspace.getLeaf(false).openFile(file);
+					});
+				}
+				row.createSpan({ cls: "vah-detail-edits", text: `×${edits}` });
+			}
+		} else if (!daily) {
 			detail.createDiv({ cls: "vah-detail-empty", text: "No activity." });
-			return;
 		}
-		const list = detail.createDiv({ cls: "vah-detail-list" });
-		for (const [path, edits] of files) {
-			const row = list.createDiv({ cls: "vah-detail-row" });
-			const link = row.createSpan({ cls: "vah-detail-link" });
-			const file = this.plugin.app.vault.getAbstractFileByPath(path);
-			link.setText(path.replace(/\.md$/, ""));
-			if (file instanceof TFile) {
-				link.addClass("vah-detail-link-live");
-				link.addEventListener("click", () => {
-					void this.plugin.app.workspace.getLeaf(false).openFile(file);
+
+		if (this.plugin.settings.showTimeline) {
+			this.renderTimeline(detail, key, folder);
+		}
+	}
+
+	/** Microsoft To Do-style task list backed by the day's reflection note. */
+	private renderTasks(
+		detail: HTMLElement,
+		key: string,
+		folder: string,
+		daily: { file: TFile | null; tasks: DailyTask[] },
+		focusAddInput: boolean
+	) {
+		const plugin = this.plugin;
+		const section = detail.createDiv({ cls: "vah-section" });
+		section.createDiv({ cls: "vah-section-title", text: "Tasks" });
+
+		const addRow = section.createDiv({ cls: "vah-task-add" });
+		addRow.createSpan({ cls: "vah-task-circle vah-task-add-circle", text: "+" });
+		const input = addRow.createEl("input", {
+			cls: "vah-task-input",
+			type: "text",
+			placeholder: "Add a task",
+		});
+		input.addEventListener("keydown", (e) => {
+			if (e.key !== "Enter" || e.isComposing) return;
+			const text = input.value.trim();
+			if (!text) return;
+			input.value = "";
+			void plugin
+				.addTaskToDailyReflection(key, text)
+				.then(() => this.showDetail(key, folder, true));
+		});
+		input.addEventListener("blur", () => {
+			if (this.pendingRender) this.render();
+		});
+		if (focusAddInput) window.setTimeout(() => input.focus(), 0);
+
+		const renderRow = (parent: HTMLElement, task: DailyTask) => {
+			const row = parent.createDiv({
+				cls: "vah-task-row" + (task.done ? " vah-task-done" : ""),
+			});
+			const circle = row.createSpan({
+				cls: "vah-task-circle" + (task.done ? " vah-task-circle-done" : ""),
+			});
+			circle.setText(task.done ? "✓" : "");
+			circle.setAttr("title", task.done ? "Mark as not done" : "Mark as done");
+			circle.addEventListener("click", () => {
+				const file = daily.file;
+				if (!file) return;
+				void plugin
+					.toggleTask(file, task, !task.done)
+					.then(() => this.showDetail(key, folder));
+			});
+			row.createSpan({ cls: "vah-task-text", text: task.text });
+		};
+
+		const open = daily.tasks.filter((t) => !t.done);
+		const done = daily.tasks.filter((t) => t.done);
+
+		if (open.length > 0) {
+			const list = section.createDiv({ cls: "vah-task-list" });
+			for (const t of open) renderRow(list, t);
+		} else if (daily.tasks.length === 0) {
+			section.createDiv({
+				cls: "vah-detail-empty",
+				text: daily.file
+					? "No tasks in this day's reflection note."
+					: "No reflection note yet — add a task to create one.",
+			});
+		}
+
+		if (done.length > 0) {
+			const header = section.createDiv({ cls: "vah-task-done-header" });
+			header.setText(
+				`${this.completedOpen ? "▾" : "▸"} Completed ${done.length}`
+			);
+			header.addEventListener("click", () => {
+				this.completedOpen = !this.completedOpen;
+				void this.showDetail(key, folder);
+			});
+			if (this.completedOpen) {
+				const list = section.createDiv({ cls: "vah-task-list" });
+				for (const t of done) renderRow(list, t);
+			}
+		}
+	}
+
+	/** Chronological trail of the day's editing sessions. */
+	private renderTimeline(detail: HTMLElement, key: string, folder: string) {
+		const sessions = (this.plugin.activity.days[key]?.sessions ?? [])
+			.filter((s) => isUnderFolder(s.f, folder))
+			.sort((a, b) => a.s - b.s);
+		if (sessions.length === 0) return;
+
+		const section = detail.createDiv({ cls: "vah-section" });
+		section.createDiv({ cls: "vah-section-title", text: "Timeline" });
+		const list = section.createDiv({ cls: "vah-timeline" });
+		for (const s of sessions) {
+			const item = list.createDiv({ cls: "vah-tl-item" });
+			item.createDiv({ cls: "vah-tl-dot" });
+			const name = (s.f.split("/").pop() ?? s.f).replace(/\.md$/, "");
+			const title = item.createDiv({ cls: "vah-tl-title" });
+			title.setText(s.k === "create" ? `${name} — created` : name);
+			const target = this.plugin.app.vault.getAbstractFileByPath(s.f);
+			if (target instanceof TFile) {
+				title.addClass("vah-detail-link-live");
+				title.addEventListener("click", () => {
+					void this.plugin.app.workspace.getLeaf(false).openFile(target);
 				});
 			}
-			row.createSpan({ cls: "vah-detail-edits", text: `×${edits}` });
+			const parts = [
+				s.e - s.s >= 60_000
+					? `${formatClockTime(s.s)}–${formatClockTime(s.e)}`
+					: formatClockTime(s.s),
+			];
+			if (s.d !== 0) parts.push(formatByteDelta(s.d));
+			if (s.n > 1) parts.push(`${s.n} saves`);
+			item.createDiv({ cls: "vah-tl-meta", text: parts.join(" · ") });
 		}
 	}
 }
@@ -1072,6 +1356,52 @@ class HeatmapSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.taskHeading)
 					.onChange(async (value) => {
 						this.plugin.settings.taskHeading = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl).setName("Day detail").setHeading();
+
+		new Setting(containerEl)
+			.setName("Show tasks")
+			.setDesc(
+				"To Do-style task list for the selected day, backed by its daily reflection note."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showTasks)
+					.onChange(async (value) => {
+						this.plugin.settings.showTasks = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Show edit timeline")
+			.setDesc(
+				"Chronological trail of when each note was edited that day and by how much."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showTimeline)
+					.onChange(async (value) => {
+						this.plugin.settings.showTimeline = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Timeline session gap")
+			.setDesc(
+				"Saves of the same note within this many minutes merge into one timeline entry."
+			)
+			.addSlider((slider) =>
+				slider
+					.setLimits(5, 60, 5)
+					.setValue(this.plugin.settings.sessionGapMinutes)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.sessionGapMinutes = value;
 						await save();
 					})
 			);
