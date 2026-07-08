@@ -2,6 +2,44 @@
 
 .vah-container {
 	padding: 4px 8px;
+	position: relative;
+	overflow: hidden;
+	border-radius: 8px;
+	min-height: 100%;
+	box-sizing: border-box;
+}
+
+.vah-content {
+	position: relative;
+	z-index: 1;
+}
+
+/* custom backdrop (image / looping video) */
+.vah-backdrop {
+	position: absolute;
+	inset: 0;
+	z-index: 0;
+	overflow: hidden;
+}
+
+.vah-backdrop img,
+.vah-backdrop video {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+
+.vah-backdrop-dim {
+	position: absolute;
+	inset: 0;
+}
+
+/* frosted-glass surfaces when a backdrop is active */
+.vah-themed .vah-task-row,
+.vah-themed .vah-task-add,
+.vah-themed .vah-controls select {
+	background: rgba(127, 127, 127, 0.22);
+	backdrop-filter: blur(6px);
 }
 
 /* stats header */
@@ -159,10 +197,25 @@
 }
 
 .vah-detail-link {
+	display: flex;
+	align-items: baseline;
+	min-width: 0;
+	color: var(--text-muted);
+}
+
+/* folder prefix truncates from its right; the file name never clips */
+.vah-link-dir {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	color: var(--text-muted);
+	flex: 0 1 auto;
+	min-width: 0;
+	color: var(--text-faint);
+}
+
+.vah-link-name {
+	white-space: nowrap;
+	flex: 0 0 auto;
 }
 
 .vah-detail-link-live {
@@ -190,6 +243,31 @@
 	text-transform: uppercase;
 	color: var(--text-muted);
 	margin-bottom: 6px;
+}
+
+.vah-section-title-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+button.vah-path-toggle {
+	font-size: 0.9em;
+	letter-spacing: normal;
+	text-transform: none;
+	padding: 2px 8px;
+	height: auto;
+	line-height: 1.4;
+	color: var(--text-muted);
+	background: transparent;
+	box-shadow: none;
+	cursor: pointer;
+}
+
+button.vah-path-toggle:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
 }
 
 /* To Do-style tasks */

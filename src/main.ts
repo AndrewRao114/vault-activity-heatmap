@@ -16,6 +16,8 @@ import {
 	WorkspaceLeaf,
 	debounce,
 	moment,
+	normalizePath,
+	requestUrl,
 } from "obsidian";
 
 export const VIEW_TYPE_HEATMAP = "vault-activity-heatmap";
@@ -88,6 +90,39 @@ interface HeatmapSettings {
 	showTasks: boolean;
 	/** Show the edit timeline in the day detail panel. */
 	showTimeline: boolean;
+	/** How "Notes edited" paths are shown: bare file name or full folder path. */
+	notesPathDisplay: "name" | "full";
+	/** Panel backdrop: vault path or https URL of an image or video; "" = none. */
+	backdropPath: string;
+	/** 0-0.9 darkness overlay over the backdrop so text stays readable. */
+	backdropDim: number;
+	/** Blur radius in px applied to the backdrop media. */
+	backdropBlur: number;
+	/** Hex text color override for the panel; "" = theme default. */
+	panelTextColor: string;
+	/** Hex background color for the panel; "" = theme default. */
+	panelBgColor: string;
+	/** AI provider for the weekly/monthly writing summaries. */
+	aiProvider: "anthropic" | "openai";
+	aiApiKey: string;
+	/** Model id; empty uses the provider default. */
+	aiModel: string;
+	/** API base URL override, for proxies/self-hosted gateways. */
+	aiBaseUrl: string;
+	/** Folder that generated summary notes are written into. */
+	aiSummaryFolder: string;
+	/** Automatically summarize each week once it completes. */
+	aiAutoWeekly: boolean;
+	/** Automatically summarize each month once it completes. */
+	aiAutoMonthly: boolean;
+	/** Week-start date key of the last auto-summarized week. */
+	aiLastWeekly: string;
+	/** YYYY-MM of the last auto-summarized month. */
+	aiLastMonthly: string;
+	/** Show a desktop notification when a summary is ready. */
+	notifyDesktop: boolean;
+	/** POST endpoint for phone notifications (e.g. https://ntfy.sh/your-topic). */
+	notifyWebhook: string;
 }
 
 const DEFAULT_SETTINGS: HeatmapSettings = {
@@ -105,6 +140,23 @@ const DEFAULT_SETTINGS: HeatmapSettings = {
 	sessionGapMinutes: 15,
 	showTasks: true,
 	showTimeline: true,
+	notesPathDisplay: "name",
+	backdropPath: "",
+	backdropDim: 0.45,
+	backdropBlur: 0,
+	panelTextColor: "",
+	panelBgColor: "",
+	aiProvider: "anthropic",
+	aiApiKey: "",
+	aiModel: "",
+	aiBaseUrl: "",
+	aiSummaryFolder: "AI summaries",
+	aiAutoWeekly: false,
+	aiAutoMonthly: false,
+	aiLastWeekly: "",
+	aiLastMonthly: "",
+	notifyDesktop: true,
+	notifyWebhook: "",
 };
 
 interface PersistedData {
@@ -185,6 +237,30 @@ function levelColor(baseColor: string, level: number): string {
 function isUnderFolder(path: string, folder: string): boolean {
 	if (!folder) return true;
 	return path.startsWith(folder + "/");
+}
+
+/**
+ * Display labels for a day's edited-note paths. In "name" mode each label is
+ * the shortest trailing run of path segments that is unique within the list —
+ * usually just the file name, but growing to "parent/name" (or deeper) only
+ * where notes would otherwise be indistinguishable. "full" shows the whole path.
+ */
+function notePathLabels(paths: string[], mode: "name" | "full"): string[] {
+	const stripExt = (p: string) => p.replace(/\.md$/, "");
+	if (mode === "full") return paths.map(stripExt);
+	const segs = paths.map((p) => stripExt(p).split("/"));
+	const suffix = (parts: string[], take: number) =>
+		parts.slice(Math.max(0, parts.length - take)).join("/");
+	return segs.map((parts, idx) => {
+		for (let take = 1; take <= parts.length; take++) {
+			const label = suffix(parts, take);
+			const unique = segs.every(
+				(other, j) => j === idx || suffix(other, take) !== label
+			);
+			if (unique || take === parts.length) return label;
+		}
+		return parts.join("/");
+	});
 }
 
 function formatClockTime(ms: number): string {
@@ -348,6 +424,37 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "ai-summarize-week",
+			name: "AI summary: this week (so far)",
+			callback: () => {
+				const start = this.weekStartOf(new Date());
+				void this.summarizePeriod(
+					toDateKey(start),
+					toDateKey(startOfToday()),
+					"Weekly",
+					`Weekly summary ${toDateKey(start)}`
+				);
+			},
+		});
+
+		this.addCommand({
+			id: "ai-summarize-month",
+			name: "AI summary: this month (so far)",
+			callback: () => {
+				const today = startOfToday();
+				const monthId = `${today.getFullYear()}-${String(
+					today.getMonth() + 1
+				).padStart(2, "0")}`;
+				void this.summarizePeriod(
+					`${monthId}-01`,
+					toDateKey(today),
+					"Monthly",
+					`Monthly summary ${monthId}`
+				);
+			},
+		});
+
 		this.addSettingTab(new HeatmapSettingTab(this.app, this));
 
 		// Vault emits `create` for every existing file during startup, so only
@@ -364,6 +471,12 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 			);
 			this.registerEvent(
 				this.app.vault.on("rename", (f, oldPath) => this.migratePath(f, oldPath))
+			);
+
+			// auto weekly/monthly summaries: check shortly after startup, then hourly
+			window.setTimeout(() => this.maybeAutoSummarize(), 30_000);
+			this.registerInterval(
+				window.setInterval(() => this.maybeAutoSummarize(), 60 * 60 * 1000)
 			);
 		});
 	}
@@ -614,6 +727,266 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 		});
 	}
 
+	// -- AI summaries & notifications -------------------------------------------
+
+	private aiRunning = false;
+
+	weekStartOf(date: Date): Date {
+		const d = new Date(date);
+		d.setHours(0, 0, 0, 0);
+		const dow = (d.getDay() - this.settings.firstDayOfWeek + 7) % 7;
+		d.setDate(d.getDate() - dow);
+		return d;
+	}
+
+	/** Summarize completed periods that have not been summarized yet. */
+	maybeAutoSummarize() {
+		const s = this.settings;
+		if (!s.aiApiKey) return;
+		const today = startOfToday();
+
+		if (s.aiAutoWeekly) {
+			const thisWeekStart = this.weekStartOf(today);
+			const prevStart = new Date(thisWeekStart);
+			prevStart.setDate(prevStart.getDate() - 7);
+			const prevKey = toDateKey(prevStart);
+			if (s.aiLastWeekly !== prevKey) {
+				const prevEnd = new Date(thisWeekStart);
+				prevEnd.setDate(prevEnd.getDate() - 1);
+				s.aiLastWeekly = prevKey;
+				void this.persist();
+				void this.summarizePeriod(
+					prevKey,
+					toDateKey(prevEnd),
+					"Weekly",
+					`Weekly summary ${prevKey}`
+				);
+			}
+		}
+
+		if (s.aiAutoMonthly) {
+			const y = today.getFullYear();
+			const m = today.getMonth();
+			const prevId =
+				m === 0
+					? `${y - 1}-12`
+					: `${y}-${String(m).padStart(2, "0")}`;
+			if (s.aiLastMonthly !== prevId) {
+				const lastDayPrev = new Date(y, m, 0);
+				s.aiLastMonthly = prevId;
+				void this.persist();
+				void this.summarizePeriod(
+					`${prevId}-01`,
+					toDateKey(lastDayPrev),
+					"Monthly",
+					`Monthly summary ${prevId}`
+				);
+			}
+		}
+	}
+
+	async summarizePeriod(
+		startKey: string,
+		endKey: string,
+		label: "Weekly" | "Monthly",
+		noteName: string
+	) {
+		const s = this.settings;
+		if (!s.aiApiKey) {
+			new Notice("Heatmap: set an AI API key in the plugin settings first.");
+			return;
+		}
+		if (this.aiRunning) {
+			new Notice("Heatmap: a summary is already being generated.");
+			return;
+		}
+		this.aiRunning = true;
+		new Notice(`Heatmap: generating ${label.toLowerCase()} summary…`);
+		try {
+			const material = await this.collectPeriodMaterial(startKey, endKey);
+			if (material.fileCount === 0) {
+				new Notice(`Heatmap: no recorded activity between ${startKey} and ${endKey}.`);
+				return;
+			}
+			const prompt = [
+				`You are summarizing the writing activity of a personal Obsidian vault for the period ${startKey} to ${endKey}.`,
+				`Activity: ${material.fileCount} notes edited across ${material.activeDays} active days, ${material.totalEdits} edits in total.`,
+				`Write a concise markdown summary with the sections **Overview**, **Main themes**, **Progress**, and **Suggested focus for the next period**. Keep it under 300 words. Respond in the language most of the notes are written in (they may be English, 中文, or mixed).`,
+				`Excerpts of the edited notes follow, each preceded by its path and edit count:`,
+				...material.excerpts,
+			].join("\n\n");
+
+			const summary = await this.callModel(prompt);
+			const path = await this.writeSummaryNote(
+				noteName,
+				label,
+				startKey,
+				endKey,
+				summary,
+				material
+			);
+			await this.notifyAll(
+				`${label} writing summary ready`,
+				summary.trim().split("\n").slice(0, 4).join(" ").slice(0, 300)
+			);
+			new Notice(`Heatmap: ${label.toLowerCase()} summary saved to ${path}`);
+		} catch (e) {
+			console.error("vault-activity-heatmap: summary failed", e);
+			new Notice(
+				`Heatmap: summary failed — ${e instanceof Error ? e.message : String(e)}`
+			);
+		} finally {
+			this.aiRunning = false;
+		}
+	}
+
+	private async collectPeriodMaterial(startKey: string, endKey: string) {
+		const perFile = new Map<string, number>();
+		let totalEdits = 0;
+		let activeDays = 0;
+		for (const [key, day] of Object.entries(this.activity.days)) {
+			if (key < startKey || key > endKey) continue;
+			let dayEdits = 0;
+			for (const [path, n] of Object.entries(day.files)) {
+				perFile.set(path, (perFile.get(path) ?? 0) + n);
+				dayEdits += n;
+			}
+			if (dayEdits > 0) activeDays += 1;
+			totalEdits += dayEdits;
+		}
+		const ranked = [...perFile.entries()].sort((a, b) => b[1] - a[1]);
+		const excerpts: string[] = [];
+		let budget = 60_000; // keep the request well inside context limits
+		for (const [path, edits] of ranked.slice(0, 30)) {
+			if (budget <= 0) break;
+			const f = this.app.vault.getAbstractFileByPath(path);
+			if (!(f instanceof TFile)) continue;
+			let text: string;
+			try {
+				text = await this.app.vault.cachedRead(f);
+			} catch {
+				continue;
+			}
+			const excerpt = text.slice(0, Math.min(3000, budget));
+			budget -= excerpt.length;
+			excerpts.push(`--- ${path} (${edits} edits) ---\n${excerpt}`);
+		}
+		return { fileCount: perFile.size, totalEdits, activeDays, excerpts };
+	}
+
+	private async callModel(prompt: string): Promise<string> {
+		const s = this.settings;
+		if (s.aiProvider === "anthropic") {
+			const base = (s.aiBaseUrl.trim() || "https://api.anthropic.com").replace(/\/+$/, "");
+			const res = await requestUrl({
+				url: `${base}/v1/messages`,
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"x-api-key": s.aiApiKey,
+					"anthropic-version": "2023-06-01",
+				},
+				body: JSON.stringify({
+					model: s.aiModel.trim() || "claude-sonnet-5",
+					max_tokens: 1500,
+					messages: [{ role: "user", content: prompt }],
+				}),
+				throw: false,
+			});
+			if (res.status >= 300) {
+				throw new Error(`API error ${res.status}: ${res.text.slice(0, 200)}`);
+			}
+			const blocks = (res.json?.content ?? []) as Array<{ text?: string }>;
+			const text = blocks.map((b) => b.text ?? "").join("");
+			if (!text.trim()) throw new Error("the model returned an empty response");
+			return text;
+		}
+		const base = (s.aiBaseUrl.trim() || "https://api.openai.com").replace(/\/+$/, "");
+		const res = await requestUrl({
+			url: `${base}/v1/chat/completions`,
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				authorization: `Bearer ${s.aiApiKey}`,
+			},
+			body: JSON.stringify({
+				model: s.aiModel.trim() || "gpt-4o-mini",
+				messages: [{ role: "user", content: prompt }],
+			}),
+			throw: false,
+		});
+		if (res.status >= 300) {
+			throw new Error(`API error ${res.status}: ${res.text.slice(0, 200)}`);
+		}
+		const text = res.json?.choices?.[0]?.message?.content ?? "";
+		if (!text.trim()) throw new Error("the model returned an empty response");
+		return text;
+	}
+
+	private async writeSummaryNote(
+		noteName: string,
+		label: string,
+		startKey: string,
+		endKey: string,
+		summary: string,
+		m: { fileCount: number; totalEdits: number; activeDays: number }
+	): Promise<string> {
+		const folder = (this.settings.aiSummaryFolder.trim() || "AI summaries").replace(
+			/^\/+|\/+$/g,
+			""
+		);
+		await this.ensureFolder(folder);
+		const path = `${folder}/${noteName}.md`;
+		const content =
+			`# ${label} summary · ${startKey} → ${endKey}\n\n` +
+			`${summary.trim()}\n\n---\n` +
+			`*${m.fileCount} notes · ${m.totalEdits} edits · ${m.activeDays} active days · generated ${new Date().toLocaleString()}*\n`;
+		const existing = this.app.vault.getAbstractFileByPath(path);
+		if (existing instanceof TFile) {
+			await this.app.vault.modify(existing, content);
+		} else {
+			await this.app.vault.create(path, content);
+		}
+		return path;
+	}
+
+	private async notifyAll(title: string, body: string) {
+		if (this.settings.notifyDesktop && typeof Notification !== "undefined") {
+			try {
+				new Notification(title, { body: body.slice(0, 180) });
+			} catch (e) {
+				console.error("vault-activity-heatmap: desktop notification failed", e);
+			}
+		}
+		const hook = this.settings.notifyWebhook.trim();
+		if (hook) {
+			try {
+				// plain-text body works for ntfy.sh and most generic webhooks;
+				// the title goes in the body to stay UTF-8 safe
+				await requestUrl({
+					url: hook,
+					method: "POST",
+					body: `${title}\n${body.slice(0, 800)}`,
+					throw: false,
+				});
+			} catch (e) {
+				console.error("vault-activity-heatmap: webhook notification failed", e);
+			}
+		}
+	}
+
+	// -- panel theme -------------------------------------------------------------
+
+	/** Resolve a backdrop setting to a loadable URL (vault file or https). */
+	resolveBackdropUrl(setting: string): string | null {
+		const s = setting.trim();
+		if (!s) return null;
+		if (/^https?:\/\//i.test(s)) return s;
+		const f = this.app.vault.getAbstractFileByPath(normalizePath(s));
+		if (f instanceof TFile) return this.app.vault.getResourcePath(f);
+		return null;
+	}
+
 	// -- view plumbing ---------------------------------------------------------
 
 	async activateView() {
@@ -794,7 +1167,9 @@ class HeatmapView extends ItemView {
 
 		const root = this.contentEl;
 		root.empty();
-		const container = root.createDiv({ cls: "vah-container" });
+		const shell = root.createDiv({ cls: "vah-container" });
+		this.applyPanelTheme(shell);
+		const container = shell.createDiv({ cls: "vah-content" });
 
 		// -- stats header (notes / active days / streak) ----------------------
 		const allNotes = plugin.app.vault
@@ -926,6 +1301,48 @@ class HeatmapView extends ItemView {
 		});
 	}
 
+	/**
+	 * Panel-scoped theming: custom text/background colors and an image or
+	 * looping video backdrop, without touching the rest of the Obsidian theme.
+	 */
+	private applyPanelTheme(shell: HTMLElement) {
+		const s = this.plugin.settings;
+
+		if (s.panelBgColor) shell.style.backgroundColor = s.panelBgColor;
+		if (s.panelTextColor) {
+			const [r, g, b] = hexToRgb(s.panelTextColor);
+			shell.style.color = `rgb(${r}, ${g}, ${b})`;
+			shell.style.setProperty("--text-normal", `rgb(${r}, ${g}, ${b})`);
+			shell.style.setProperty("--text-muted", `rgba(${r}, ${g}, ${b}, 0.75)`);
+			shell.style.setProperty("--text-faint", `rgba(${r}, ${g}, ${b}, 0.55)`);
+		}
+
+		const url = this.plugin.resolveBackdropUrl(s.backdropPath);
+		if (!url) return;
+		shell.addClass("vah-themed");
+		const backdrop = shell.createDiv({ cls: "vah-backdrop" });
+		const isVideo = /\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(s.backdropPath.trim());
+		let media: HTMLElement;
+		if (isVideo) {
+			const video = backdrop.createEl("video");
+			video.src = url;
+			video.autoplay = true;
+			video.loop = true;
+			video.muted = true;
+			video.setAttr("playsinline", "");
+			media = video;
+		} else {
+			media = backdrop.createEl("img", { attr: { src: url } });
+		}
+		if (s.backdropBlur > 0) {
+			media.style.filter = `blur(${s.backdropBlur}px)`;
+			// oversize slightly so blurred edges don't show the background
+			media.style.transform = "scale(1.06)";
+		}
+		const dim = backdrop.createDiv({ cls: "vah-backdrop-dim" });
+		dim.style.backgroundColor = `rgba(0, 0, 0, ${s.backdropDim})`;
+	}
+
 	/** Right-click menu: add a task to / open the day's reflection note. */
 	private attachCellMenu(cell: HTMLElement, dateKey: string) {
 		cell.addEventListener("contextmenu", (e) => {
@@ -994,13 +1411,47 @@ class HeatmapView extends ItemView {
 
 		if (files.length > 0) {
 			const section = detail.createDiv({ cls: "vah-section" });
-			section.createDiv({ cls: "vah-section-title", text: "Notes edited" });
+			const titleRow = section.createDiv({
+				cls: "vah-section-title vah-section-title-row",
+			});
+			titleRow.createSpan({ text: "Notes edited" });
+			const showingFull = this.plugin.settings.notesPathDisplay === "full";
+			const toggle = titleRow.createEl("button", {
+				cls: "vah-path-toggle",
+				text: showingFull ? "Hide paths" : "Show paths",
+			});
+			toggle.setAttr(
+				"title",
+				showingFull
+					? "Show file names only"
+					: "Show the full folder path of each note"
+			);
+			toggle.addEventListener("click", () => {
+				this.plugin.settings.notesPathDisplay = showingFull ? "name" : "full";
+				void this.plugin.persist();
+				void this.showDetail(key, folder);
+			});
+
+			const labels = notePathLabels(
+				files.map(([path]) => path),
+				this.plugin.settings.notesPathDisplay
+			);
 			const list = section.createDiv({ cls: "vah-detail-list" });
-			for (const [path, edits] of files) {
+			files.forEach(([path, edits], i) => {
 				const row = list.createDiv({ cls: "vah-detail-row" });
 				const link = row.createSpan({ cls: "vah-detail-link" });
 				const file = this.plugin.app.vault.getAbstractFileByPath(path);
-				link.setText(path.replace(/\.md$/, ""));
+				// keep the file name visible; only the folder prefix truncates
+				const label = labels[i];
+				const slash = label.lastIndexOf("/");
+				if (slash >= 0) {
+					link.createSpan({
+						cls: "vah-link-dir",
+						text: label.slice(0, slash + 1),
+					});
+				}
+				link.createSpan({ cls: "vah-link-name", text: label.slice(slash + 1) });
+				link.setAttr("title", path.replace(/\.md$/, "")); // full path on hover
 				if (file instanceof TFile) {
 					link.addClass("vah-detail-link-live");
 					link.addEventListener("click", () => {
@@ -1008,7 +1459,7 @@ class HeatmapView extends ItemView {
 					});
 				}
 				row.createSpan({ cls: "vah-detail-edits", text: `×${edits}` });
-			}
+			});
 		} else if (!daily) {
 			detail.createDiv({ cls: "vah-detail-empty", text: "No activity." });
 		}
@@ -1291,6 +1742,105 @@ class HeatmapSettingTab extends PluginSettingTab {
 					})
 			);
 
+		new Setting(containerEl).setName("Panel theme").setHeading();
+
+		new Setting(containerEl)
+			.setName("Backdrop image or video")
+			.setDesc(
+				"Vault path (e.g. assets/wall.png or clips/loop.mp4) or an https:// URL. Images (PNG/JPG/GIF/WebP) and auto-looping muted videos (MP4/WebM) are supported. Leave blank for none."
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("assets/backdrop.mp4")
+					.setValue(this.plugin.settings.backdropPath)
+					.onChange(async (value) => {
+						this.plugin.settings.backdropPath = value.trim();
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Backdrop dim")
+			.setDesc("Darkens the backdrop so the heatmap stays readable.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(0, 90, 5)
+					.setValue(Math.round(this.plugin.settings.backdropDim * 100))
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.backdropDim = value / 100;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Backdrop blur")
+			.setDesc("Blur radius in pixels applied to the backdrop.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(0, 20, 1)
+					.setValue(this.plugin.settings.backdropBlur)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.backdropBlur = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Panel text color")
+			.setDesc(
+				"Overrides the panel's text color only (RGB or hex). Leave blank for the theme default."
+			)
+			.addText((text) => {
+				text
+					.setPlaceholder("theme default")
+					.setValue(
+						this.plugin.settings.panelTextColor
+							? hexToRgbString(this.plugin.settings.panelTextColor)
+							: ""
+					)
+					.onChange(async (value) => {
+						if (!value.trim()) {
+							this.plugin.settings.panelTextColor = "";
+							await save();
+							return;
+						}
+						const hex = parseColorInput(value);
+						if (!hex) return;
+						this.plugin.settings.panelTextColor = hex;
+						await save();
+					});
+				text.inputEl.addClass("vah-rgb-input");
+			});
+
+		new Setting(containerEl)
+			.setName("Panel background color")
+			.setDesc(
+				"Overrides the panel's background only (RGB or hex). Leave blank for the theme default."
+			)
+			.addText((text) => {
+				text
+					.setPlaceholder("theme default")
+					.setValue(
+						this.plugin.settings.panelBgColor
+							? hexToRgbString(this.plugin.settings.panelBgColor)
+							: ""
+					)
+					.onChange(async (value) => {
+						if (!value.trim()) {
+							this.plugin.settings.panelBgColor = "";
+							await save();
+							return;
+						}
+						const hex = parseColorInput(value);
+						if (!hex) return;
+						this.plugin.settings.panelBgColor = hex;
+						await save();
+					});
+				text.inputEl.addClass("vah-rgb-input");
+			});
+
 		new Setting(containerEl).setName("Tracking").setHeading();
 
 		new Setting(containerEl)
@@ -1377,6 +1927,22 @@ class HeatmapSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Notes edited: path display")
+			.setDesc(
+				"Show just the file name (cleaner) or the full folder path in the 'Notes edited' list. You can also flip this with the button on the list itself."
+			)
+			.addDropdown((dd) =>
+				dd
+					.addOption("name", "File name only")
+					.addOption("full", "Full folder path")
+					.setValue(this.plugin.settings.notesPathDisplay)
+					.onChange(async (value) => {
+						this.plugin.settings.notesPathDisplay = value as "name" | "full";
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
 			.setName("Show edit timeline")
 			.setDesc(
 				"Chronological trail of when each note was edited that day and by how much."
@@ -1404,6 +1970,157 @@ class HeatmapSettingTab extends PluginSettingTab {
 						this.plugin.settings.sessionGapMinutes = value;
 						await save();
 					})
+			);
+
+		new Setting(containerEl).setName("AI summaries & notifications").setHeading();
+
+		new Setting(containerEl)
+			.setName("Provider")
+			.setDesc("Which API the weekly/monthly writing summaries are generated with.")
+			.addDropdown((dd) =>
+				dd
+					.addOption("anthropic", "Anthropic (Claude)")
+					.addOption("openai", "OpenAI-compatible")
+					.setValue(this.plugin.settings.aiProvider)
+					.onChange(async (value) => {
+						this.plugin.settings.aiProvider = value as "anthropic" | "openai";
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("API key")
+			.setDesc(
+				"Stored in this plugin's data.json inside your vault — do not share that file."
+			)
+			.addText((text) => {
+				text
+					.setPlaceholder("sk-…")
+					.setValue(this.plugin.settings.aiApiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.aiApiKey = value.trim();
+						await save();
+					});
+				text.inputEl.type = "password";
+			});
+
+		new Setting(containerEl)
+			.setName("Model")
+			.setDesc("Blank uses the provider default (claude-sonnet-5 / gpt-4o-mini).")
+			.addText((text) =>
+				text
+					.setPlaceholder("claude-sonnet-5")
+					.setValue(this.plugin.settings.aiModel)
+					.onChange(async (value) => {
+						this.plugin.settings.aiModel = value.trim();
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("API base URL")
+			.setDesc("Optional override for proxies or self-hosted gateways.")
+			.addText((text) =>
+				text
+					.setPlaceholder("https://api.anthropic.com")
+					.setValue(this.plugin.settings.aiBaseUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.aiBaseUrl = value.trim();
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Summary folder")
+			.setDesc("Where generated summary notes are saved.")
+			.addText((text) =>
+				text
+					.setPlaceholder("AI summaries")
+					.setValue(this.plugin.settings.aiSummaryFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.aiSummaryFolder = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Auto-summarize each week")
+			.setDesc("When a new week starts, the completed week is summarized automatically.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.aiAutoWeekly)
+					.onChange(async (value) => {
+						this.plugin.settings.aiAutoWeekly = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Auto-summarize each month")
+			.setDesc("When a new month starts, the completed month is summarized automatically.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.aiAutoMonthly)
+					.onChange(async (value) => {
+						this.plugin.settings.aiAutoMonthly = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Desktop notification")
+			.setDesc("Show a system notification on this computer when a summary is ready.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.notifyDesktop)
+					.onChange(async (value) => {
+						this.plugin.settings.notifyDesktop = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Phone notification webhook")
+			.setDesc(
+				"POST endpoint pinged when a summary is ready. Easiest setup: install the free ntfy app on your phone, subscribe to a private topic, and enter https://ntfy.sh/your-topic here."
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("https://ntfy.sh/your-topic")
+					.setValue(this.plugin.settings.notifyWebhook)
+					.onChange(async (value) => {
+						this.plugin.settings.notifyWebhook = value.trim();
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Run now")
+			.setDesc("Generate a summary of the current period immediately.")
+			.addButton((btn) =>
+				btn.setButtonText("This week").onClick(() => {
+					const start = this.plugin.weekStartOf(new Date());
+					void this.plugin.summarizePeriod(
+						toDateKey(start),
+						toDateKey(startOfToday()),
+						"Weekly",
+						`Weekly summary ${toDateKey(start)}`
+					);
+				})
+			)
+			.addButton((btn) =>
+				btn.setButtonText("This month").onClick(() => {
+					const today = startOfToday();
+					const monthId = `${today.getFullYear()}-${String(
+						today.getMonth() + 1
+					).padStart(2, "0")}`;
+					void this.plugin.summarizePeriod(
+						`${monthId}-01`,
+						toDateKey(today),
+						"Monthly",
+						`Monthly summary ${monthId}`
+					);
+				})
 			);
 
 		new Setting(containerEl).setName("History").setHeading();
