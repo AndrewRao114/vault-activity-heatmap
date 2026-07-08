@@ -41,6 +41,7 @@ var DEFAULT_SETTINGS = {
   sessionGapMinutes: 15,
   showTasks: true,
   showTimeline: true,
+  notesPathDisplay: "name",
   backdropPath: "",
   backdropDim: 0.45,
   backdropBlur: 0,
@@ -118,6 +119,22 @@ function levelColor(baseColor, level) {
 function isUnderFolder(path, folder) {
   if (!folder) return true;
   return path.startsWith(folder + "/");
+}
+function notePathLabels(paths, mode) {
+  const stripExt = (p) => p.replace(/\.md$/, "");
+  if (mode === "full") return paths.map(stripExt);
+  const segs = paths.map((p) => stripExt(p).split("/"));
+  const suffix = (parts, take) => parts.slice(Math.max(0, parts.length - take)).join("/");
+  return segs.map((parts, idx) => {
+    for (let take = 1; take <= parts.length; take++) {
+      const label = suffix(parts, take);
+      const unique = segs.every(
+        (other, j) => j === idx || suffix(other, take) !== label
+      );
+      if (unique || take === parts.length) return label;
+    }
+    return parts.join("/");
+  });
 }
 function formatClockTime(ms) {
   const d = new Date(ms);
@@ -1064,13 +1081,43 @@ var HeatmapView = class extends import_obsidian.ItemView {
     if (daily) this.renderTasks(detail, key, folder, daily, focusAddInput);
     if (files.length > 0) {
       const section = detail.createDiv({ cls: "vah-section" });
-      section.createDiv({ cls: "vah-section-title", text: "Notes edited" });
+      const titleRow = section.createDiv({
+        cls: "vah-section-title vah-section-title-row"
+      });
+      titleRow.createSpan({ text: "Notes edited" });
+      const showingFull = this.plugin.settings.notesPathDisplay === "full";
+      const toggle = titleRow.createEl("button", {
+        cls: "vah-path-toggle",
+        text: showingFull ? "Hide paths" : "Show paths"
+      });
+      toggle.setAttr(
+        "title",
+        showingFull ? "Show file names only" : "Show the full folder path of each note"
+      );
+      toggle.addEventListener("click", () => {
+        this.plugin.settings.notesPathDisplay = showingFull ? "name" : "full";
+        void this.plugin.persist();
+        void this.showDetail(key, folder);
+      });
+      const labels = notePathLabels(
+        files.map(([path]) => path),
+        this.plugin.settings.notesPathDisplay
+      );
       const list = section.createDiv({ cls: "vah-detail-list" });
-      for (const [path, edits] of files) {
+      files.forEach(([path, edits], i) => {
         const row = list.createDiv({ cls: "vah-detail-row" });
         const link = row.createSpan({ cls: "vah-detail-link" });
         const file = this.plugin.app.vault.getAbstractFileByPath(path);
-        link.setText(path.replace(/\.md$/, ""));
+        const label = labels[i];
+        const slash = label.lastIndexOf("/");
+        if (slash >= 0) {
+          link.createSpan({
+            cls: "vah-link-dir",
+            text: label.slice(0, slash + 1)
+          });
+        }
+        link.createSpan({ cls: "vah-link-name", text: label.slice(slash + 1) });
+        link.setAttr("title", path.replace(/\.md$/, ""));
         if (file instanceof import_obsidian.TFile) {
           link.addClass("vah-detail-link-live");
           link.addEventListener("click", () => {
@@ -1078,7 +1125,7 @@ var HeatmapView = class extends import_obsidian.ItemView {
           });
         }
         row.createSpan({ cls: "vah-detail-edits", text: `\xD7${edits}` });
-      }
+      });
     } else if (!daily) {
       detail.createDiv({ cls: "vah-detail-empty", text: "No activity." });
     }
@@ -1368,6 +1415,14 @@ var HeatmapSettingTab = class extends import_obsidian.PluginSettingTab {
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTasks).onChange(async (value) => {
         this.plugin.settings.showTasks = value;
+        await save();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Notes edited: path display").setDesc(
+      "Show just the file name (cleaner) or the full folder path in the 'Notes edited' list. You can also flip this with the button on the list itself."
+    ).addDropdown(
+      (dd) => dd.addOption("name", "File name only").addOption("full", "Full folder path").setValue(this.plugin.settings.notesPathDisplay).onChange(async (value) => {
+        this.plugin.settings.notesPathDisplay = value;
         await save();
       })
     );

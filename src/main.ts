@@ -90,6 +90,8 @@ interface HeatmapSettings {
 	showTasks: boolean;
 	/** Show the edit timeline in the day detail panel. */
 	showTimeline: boolean;
+	/** How "Notes edited" paths are shown: bare file name or full folder path. */
+	notesPathDisplay: "name" | "full";
 	/** Panel backdrop: vault path or https URL of an image or video; "" = none. */
 	backdropPath: string;
 	/** 0-0.9 darkness overlay over the backdrop so text stays readable. */
@@ -138,6 +140,7 @@ const DEFAULT_SETTINGS: HeatmapSettings = {
 	sessionGapMinutes: 15,
 	showTasks: true,
 	showTimeline: true,
+	notesPathDisplay: "name",
 	backdropPath: "",
 	backdropDim: 0.45,
 	backdropBlur: 0,
@@ -234,6 +237,30 @@ function levelColor(baseColor: string, level: number): string {
 function isUnderFolder(path: string, folder: string): boolean {
 	if (!folder) return true;
 	return path.startsWith(folder + "/");
+}
+
+/**
+ * Display labels for a day's edited-note paths. In "name" mode each label is
+ * the shortest trailing run of path segments that is unique within the list —
+ * usually just the file name, but growing to "parent/name" (or deeper) only
+ * where notes would otherwise be indistinguishable. "full" shows the whole path.
+ */
+function notePathLabels(paths: string[], mode: "name" | "full"): string[] {
+	const stripExt = (p: string) => p.replace(/\.md$/, "");
+	if (mode === "full") return paths.map(stripExt);
+	const segs = paths.map((p) => stripExt(p).split("/"));
+	const suffix = (parts: string[], take: number) =>
+		parts.slice(Math.max(0, parts.length - take)).join("/");
+	return segs.map((parts, idx) => {
+		for (let take = 1; take <= parts.length; take++) {
+			const label = suffix(parts, take);
+			const unique = segs.every(
+				(other, j) => j === idx || suffix(other, take) !== label
+			);
+			if (unique || take === parts.length) return label;
+		}
+		return parts.join("/");
+	});
 }
 
 function formatClockTime(ms: number): string {
@@ -1384,13 +1411,47 @@ class HeatmapView extends ItemView {
 
 		if (files.length > 0) {
 			const section = detail.createDiv({ cls: "vah-section" });
-			section.createDiv({ cls: "vah-section-title", text: "Notes edited" });
+			const titleRow = section.createDiv({
+				cls: "vah-section-title vah-section-title-row",
+			});
+			titleRow.createSpan({ text: "Notes edited" });
+			const showingFull = this.plugin.settings.notesPathDisplay === "full";
+			const toggle = titleRow.createEl("button", {
+				cls: "vah-path-toggle",
+				text: showingFull ? "Hide paths" : "Show paths",
+			});
+			toggle.setAttr(
+				"title",
+				showingFull
+					? "Show file names only"
+					: "Show the full folder path of each note"
+			);
+			toggle.addEventListener("click", () => {
+				this.plugin.settings.notesPathDisplay = showingFull ? "name" : "full";
+				void this.plugin.persist();
+				void this.showDetail(key, folder);
+			});
+
+			const labels = notePathLabels(
+				files.map(([path]) => path),
+				this.plugin.settings.notesPathDisplay
+			);
 			const list = section.createDiv({ cls: "vah-detail-list" });
-			for (const [path, edits] of files) {
+			files.forEach(([path, edits], i) => {
 				const row = list.createDiv({ cls: "vah-detail-row" });
 				const link = row.createSpan({ cls: "vah-detail-link" });
 				const file = this.plugin.app.vault.getAbstractFileByPath(path);
-				link.setText(path.replace(/\.md$/, ""));
+				// keep the file name visible; only the folder prefix truncates
+				const label = labels[i];
+				const slash = label.lastIndexOf("/");
+				if (slash >= 0) {
+					link.createSpan({
+						cls: "vah-link-dir",
+						text: label.slice(0, slash + 1),
+					});
+				}
+				link.createSpan({ cls: "vah-link-name", text: label.slice(slash + 1) });
+				link.setAttr("title", path.replace(/\.md$/, "")); // full path on hover
 				if (file instanceof TFile) {
 					link.addClass("vah-detail-link-live");
 					link.addEventListener("click", () => {
@@ -1398,7 +1459,7 @@ class HeatmapView extends ItemView {
 					});
 				}
 				row.createSpan({ cls: "vah-detail-edits", text: `×${edits}` });
-			}
+			});
 		} else if (!daily) {
 			detail.createDiv({ cls: "vah-detail-empty", text: "No activity." });
 		}
@@ -1861,6 +1922,22 @@ class HeatmapSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.showTasks)
 					.onChange(async (value) => {
 						this.plugin.settings.showTasks = value;
+						await save();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Notes edited: path display")
+			.setDesc(
+				"Show just the file name (cleaner) or the full folder path in the 'Notes edited' list. You can also flip this with the button on the list itself."
+			)
+			.addDropdown((dd) =>
+				dd
+					.addOption("name", "File name only")
+					.addOption("full", "Full folder path")
+					.setValue(this.plugin.settings.notesPathDisplay)
+					.onChange(async (value) => {
+						this.plugin.settings.notesPathDisplay = value as "name" | "full";
 						await save();
 					})
 			);
