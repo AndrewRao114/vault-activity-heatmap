@@ -1,7 +1,7 @@
 {
 	"id": "vault-activity-heatmap",
 	"name": "Vault Activity Heatmap",
-	"version": "1.3.1",
+	"version": "1.3.2",
 	"minAppVersion": "1.4.0",
 	"description": "GitHub-style contribution heatmap of your daily note-taking activity, with daily tasks, edit timeline, AI weekly/monthly summaries, and customizable panel themes.",
 	"author": "Andrew Rao",

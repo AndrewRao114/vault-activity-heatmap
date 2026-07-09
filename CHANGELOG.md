@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.2
+
+- Split the large plugin source into focused modules for public-review
+  readiness.
+- Preserve existing settings, command IDs, data storage, and UI behavior.
+
 ## 1.3.1
 
 - Show short file names by default in the "Notes edited" list.
