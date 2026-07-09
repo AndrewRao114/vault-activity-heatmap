@@ -1,108 +1,156 @@
 # Vault Activity Heatmap
 
-A GitHub-style contribution heatmap for Obsidian — every day of your note-taking
-shows up as a square. Touch one note and the square lights up faintly; touch ten
-and it turns dark. Just like a commit graph, but for your vault.
+[![Obsidian plugin](https://img.shields.io/badge/Obsidian-plugin-7C3AED?logo=obsidian&logoColor=white)](https://obsidian.md)
+[![Release](https://img.shields.io/github/v/release/AndrewRao114/vault-activity-heatmap?label=release)](https://github.com/AndrewRao114/vault-activity-heatmap/releases)
+[![Downloads](https://img.shields.io/github/downloads/AndrewRao114/vault-activity-heatmap/total?label=downloads)](https://github.com/AndrewRao114/vault-activity-heatmap/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-![concept](https://img.shields.io/badge/style-github%20contribution%20graph-40c463)
+A GitHub-style contribution graph for your Obsidian vault, with daily tasks,
+edit timelines, AI weekly/monthly summaries, and a customizable panel theme.
 
-## Features
+It turns your note-taking rhythm into a quiet activity dashboard: touch one note
+and the day lights up faintly; work across a folder or ten notes and the square
+gets darker. Click a day to see what changed, what you planned, and what still
+needs attention.
 
-- **Daily heatmap** — one square per day, darker = more writing. Shows up to a
-  full year, horizontally scrollable, with month and weekday labels.
-- **Automatic tracking** — records every markdown note you create or edit,
-  per day and per file. Renamed/moved notes keep their history.
-- **Folder filter** — switch the whole view to a single folder (e.g.
-  `Personal Daily Tracker`) from the dropdown at the top.
-- **Stats header** — total notes, active days, and current streak, in the style
-  of memo apps like Plidezus.
-- **Day details** — click any square (today shows by default): a Microsoft
-  To Do-style task list backed by that day's reflection note (add tasks
-  inline, check them off — the `- [ ]` in the note is updated), the notes you
-  touched, and an **edit timeline** showing when each note was worked on and
-  by how much (e.g. `14:31–14:45 · +240 B · 6 saves`). Rapid saves merge into
-  one session (gap configurable); only times and sizes are stored, never
-  content.
-- **Right-click to plan** — right-click any day square to add a task
-  (`- [ ] …`) into that day's **daily reflection note**, created automatically
-  in a configurable folder/filename format under a configurable heading.
-  The remaining days of the current week are right-clickable too, so you can
-  schedule tasks ahead. There's also a command:
-  *"Add task to today's daily reflection"*.
-- **Configurable colors, in RGB** — pick the square color with a color picker
-  or type an exact `R, G, B` (or hex) value; optionally recolor empty squares
-  too. Intensity thresholds (default `1, 3, 6, 10`), metric (unique notes vs.
-  total edits), weeks shown, week start day, and excluded folders are all
-  configurable as well.
-- **Backfill** — seed the graph from the created/modified dates of the notes
-  you already have, so it isn't empty on day one.
-- **AI weekly/monthly summaries** — bring your own API key (Anthropic or any
-  OpenAI-compatible endpoint) and the plugin summarizes what you wrote each
-  week/month into a note in `AI summaries/`, automatically when a period
-  completes or on demand (commands + buttons in settings). Notifies you via a
-  **desktop notification** and optionally your **phone** through an
-  [ntfy.sh](https://ntfy.sh) topic or any webhook.
-- **Custom panel theme** — style the heatmap panel without touching your
-  Obsidian theme: set any PNG/JPG/GIF/WebP image *or a looping MP4/WebM clip*
-  as the panel backdrop (vault path or URL), with dim and blur sliders, plus
-  panel-only text and background color overrides. Task rows turn
-  frosted-glass over a backdrop.
+## Highlights
 
-## Installation (manual)
+- **Daily activity heatmap** - one square per day, darker when you write more.
+  View the whole vault or filter to one folder.
+- **Automatic markdown tracking** - records notes created or edited per day,
+  with rename/move support.
+- **Day detail panel** - click a square to see tasks, notes edited, and a
+  timestamped edit timeline.
+- **Clean note labels** - notes show as short file names by default, with a
+  one-click "Show paths" toggle when you need the full directory.
+- **Microsoft To Do-style tasks** - add and complete tasks from the panel; the
+  source of truth stays in your daily reflection note as markdown checkboxes.
+- **Edit sessions** - rapid saves to the same note are merged into short
+  sessions such as `14:31-14:45 | +240 B | 6 saves`.
+- **AI weekly/monthly summaries** - bring your own Anthropic or OpenAI-compatible
+  API key and summarize each week or month into a note.
+- **Desktop and phone notifications** - desktop notifications locally, plus
+  optional phone/webhook pings through ntfy or any compatible endpoint.
+- **Panel-only themes** - customize this plugin without changing your Obsidian
+  theme: RGB square colors, text/background overrides, image backdrops, and
+  looping MP4/WebM video backdrops.
 
-1. In your vault, create the folder:
+## Screenshots
+
+Screenshots are coming soon. The current beta build is focused on getting the
+workflow solid before publishing polished preview media.
+
+## Installation
+
+### From Obsidian Community Plugins
+
+This plugin is being prepared for the official Obsidian community directory.
+Once approved, install it from:
+
+`Settings -> Community plugins -> Browse -> Vault Activity Heatmap`
+
+### Manual install
+
+1. Download the latest release from
+   [Releases](https://github.com/AndrewRao114/vault-activity-heatmap/releases).
+2. Copy these files into:
    `<your vault>/.obsidian/plugins/vault-activity-heatmap/`
-2. Copy these three files into it:
    - `manifest.json`
    - `main.js`
    - `styles.css`
-3. In Obsidian: **Settings → Community plugins** → reload plugins (or restart
-   Obsidian) → enable **Vault Activity Heatmap**.
-4. Click the calendar-check icon in the left ribbon (or run the command
-   *"Open activity heatmap"*) to open the view in the right sidebar.
-5. Recommended first step: run the command
-   *"Backfill history from existing file dates"* so your existing notes appear
-   on the graph immediately.
+3. Restart Obsidian or reload community plugins.
+4. Enable **Vault Activity Heatmap**.
+5. Run **Backfill history from existing file dates** if you want existing notes
+   to appear immediately.
 
-## How intensity works
+## Usage
 
-A day's count is (by default) the number of **distinct notes** you touched that
-day. With the default thresholds `1, 3, 6, 10`:
+Open the heatmap from the ribbon calendar icon or run:
 
-| Count | Square |
-| ----- | ------ |
-| 0     | empty  |
-| 1–2   | lightest |
-| 3–5   | light  |
-| 6–9   | dark   |
-| 10+   | darkest |
+`Open activity heatmap`
 
-Change the thresholds, the color, or switch the metric to *total edits per day*
-in **Settings → Vault Activity Heatmap**.
+Click any square to inspect that day. Right-click a square to add a task to that
+day's reflection note. The rest of the current week can also receive planned
+tasks, which makes the heatmap useful as a lightweight planner, not only a log.
 
-## Daily reflection tasks
+## Settings
 
-Right-click a square → **Add task to daily reflection…** → type the task.
-It lands in `<Reflection folder>/<date>.md` under the configured heading
-(default `## Tasks`), which is created if missing:
+### Tracking
 
-```markdown
-## Tasks
-- [ ] review chemistry flashcards
-```
+- Choose whether intensity uses distinct notes or total edits.
+- Set activity thresholds such as `1, 3, 6, 10`.
+- Exclude folders like templates, archives, or attachments.
+- Choose the number of weeks shown and the week start day.
 
-Configure the folder (default `Daily reflection`), the filename date format
-(moment.js syntax, default `YYYY-MM-DD`), and the heading in settings — so it
-can point at an existing daily-notes setup.
+### Daily reflection tasks
+
+- Configure the reflection folder.
+- Configure the filename date format, such as `YYYY-MM-DD`.
+- Configure the heading where tasks are inserted.
+- Toggle task and timeline sections in the detail panel.
+
+### AI summaries
+
+AI summaries are optional and require your own API key.
+
+Supported providers:
+
+- Anthropic
+- OpenAI-compatible endpoints
+
+The plugin gathers edited-note excerpts and activity stats, then writes weekly
+or monthly summaries into your vault. It does not upload your whole vault; it
+only sends the context needed for the requested summary.
+
+Important: API keys are stored in the plugin's `data.json` inside your vault.
+Do not share that file.
+
+### Panel themes
+
+Customize only this plugin panel, without changing your Obsidian theme:
+
+- RGB/hex heatmap square color
+- Empty-square color
+- Panel text color
+- Panel background color
+- Image backdrop from a vault path or URL
+- Looping muted MP4/WebM backdrop
+- Dim and blur controls for readability
+
+## Privacy
+
+By default, tracking is local and stored in:
+
+`.obsidian/plugins/vault-activity-heatmap/data.json`
+
+The plugin records activity metadata such as dates, note paths, edit counts,
+session times, and byte deltas. It does not store full note snapshots.
+
+AI summaries send selected note excerpts to the provider you configure. If you
+do not configure AI summaries, no AI API calls are made.
 
 ## Development
 
 ```bash
 npm install
-npm run dev     # watch mode
-npm run build   # production build -> main.js
+npm run dev
+npm run build
+npm run typecheck
 ```
 
-Data is stored in the plugin's own `data.json`
-(`.obsidian/plugins/vault-activity-heatmap/data.json`) — your notes are never
-modified.
+Release assets are the three compiled plugin files:
+
+- `manifest.json`
+- `main.js`
+- `styles.css`
+
+## Roadmap
+
+- Polished screenshot gallery
+- Additional summary providers
+- Optional summary templates
+- Better mobile-specific layout tuning
+
+## License
+
+MIT. See [LICENSE](LICENSE).

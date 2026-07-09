@@ -8,7 +8,14 @@
 		"build": "node esbuild.config.mjs production",
 		"typecheck": "tsc --noEmit"
 	},
-	"keywords": ["obsidian", "plugin", "heatmap"],
+	"keywords": [
+		"obsidian",
+		"obsidian-plugin",
+		"heatmap",
+		"notes",
+		"productivity",
+		"tasks"
+	],
 	"license": "MIT",
 	"devDependencies": {
 		"@types/node": "^20.14.0",
