@@ -7,9 +7,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
+function getArrayProp(value: Record<string, unknown>, key: string): unknown[] {
+	const prop = value[key];
+	return Array.isArray(prop) ? prop : [];
+}
+
 function parseAnthropicResponse(value: unknown): string {
-	if (!isRecord(value) || !Array.isArray(value.content)) return "";
-	return value.content
+	if (!isRecord(value)) return "";
+	return getArrayProp(value, "content")
 		.map((block) =>
 			isRecord(block) && typeof block.text === "string" ? block.text : ""
 		)
@@ -17,8 +22,8 @@ function parseAnthropicResponse(value: unknown): string {
 }
 
 function parseOpenAiResponse(value: unknown): string {
-	if (!isRecord(value) || !Array.isArray(value.choices)) return "";
-	const first = value.choices[0];
+	if (!isRecord(value)) return "";
+	const first = getArrayProp(value, "choices")[0];
 	if (!isRecord(first) || !isRecord(first.message)) return "";
 	return typeof first.message.content === "string" ? first.message.content : "";
 }

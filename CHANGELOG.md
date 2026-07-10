@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.4
+
+- Resolve remaining Obsidian community review source-code warnings.
+- Tighten AI summary response parsing so JSON response data stays typed as
+  `unknown` until validated.
+- Remove an unused catch binding in daily note folder creation.
+- Add README screenshots for the heatmap panel, appearance settings, and AI
+  summary settings.
+
 ## 1.3.3
 
 - Address Obsidian community-plugin review recommendations.

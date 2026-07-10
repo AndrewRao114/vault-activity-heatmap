@@ -26,7 +26,7 @@ export class DailyNotesService {
 			if (!this.plugin.app.vault.getAbstractFileByPath(current)) {
 				try {
 					await this.plugin.app.vault.createFolder(current);
-				} catch (e) {
+				} catch {
 					// folder may have been created concurrently; ignore
 				}
 			}
@@ -110,4 +110,3 @@ export class DailyNotesService {
 		});
 	}
 }
-

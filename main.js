@@ -304,15 +304,19 @@ var import_obsidian3 = require("obsidian");
 function isRecord(value) {
   return typeof value === "object" && value !== null;
 }
+function getArrayProp(value, key) {
+  const prop = value[key];
+  return Array.isArray(prop) ? prop : [];
+}
 function parseAnthropicResponse(value) {
-  if (!isRecord(value) || !Array.isArray(value.content)) return "";
-  return value.content.map(
+  if (!isRecord(value)) return "";
+  return getArrayProp(value, "content").map(
     (block) => isRecord(block) && typeof block.text === "string" ? block.text : ""
   ).join("");
 }
 function parseOpenAiResponse(value) {
-  if (!isRecord(value) || !Array.isArray(value.choices)) return "";
-  const first = value.choices[0];
+  if (!isRecord(value)) return "";
+  const first = getArrayProp(value, "choices")[0];
   if (!isRecord(first) || !isRecord(first.message)) return "";
   return typeof first.message.content === "string" ? first.message.content : "";
 }
@@ -614,7 +618,7 @@ var DailyNotesService = class {
       if (!this.plugin.app.vault.getAbstractFileByPath(current)) {
         try {
           await this.plugin.app.vault.createFolder(current);
-        } catch (e) {
+        } catch {
         }
       }
     }
