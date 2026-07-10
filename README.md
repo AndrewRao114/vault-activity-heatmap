@@ -140,8 +140,7 @@ Ways to keep your risk lower:
 
 ### From Obsidian Community Plugins
 
-This plugin is being prepared for the official Obsidian community directory.
-Once approved, install it from:
+ Install it from:
 
 `Settings -> Community plugins -> Browse -> Vault Activity Heatmap`
 
