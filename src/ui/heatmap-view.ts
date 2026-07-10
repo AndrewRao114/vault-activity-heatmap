@@ -1,10 +1,4 @@
-import {
-	DropdownComponent,
-	ItemView,
-	Menu,
-	TFile,
-	WorkspaceLeaf,
-} from "obsidian";
+import { DropdownComponent, ItemView, Menu, TFile, WorkspaceLeaf } from "obsidian";
 
 import { DAY_NAMES, MONTH_NAMES, VIEW_TYPE_HEATMAP } from "../defaults";
 import type VaultActivityHeatmapPlugin from "../main";
@@ -51,7 +45,7 @@ export class HeatmapView extends ItemView {
 	render() {
 		// Re-rendering while the user is typing in one of our inputs would
 		// destroy the input under their cursor; retry on blur instead.
-		const active = document.activeElement;
+		const active = activeDocument.activeElement;
 		if (active instanceof HTMLInputElement && this.contentEl.contains(active)) {
 			this.pendingRender = true;
 			return;
@@ -150,7 +144,7 @@ export class HeatmapView extends ItemView {
 				const isFuture = cursor.getTime() > today.getTime();
 
 				if (settings.emptyColor) {
-					cell.style.backgroundColor = settings.emptyColor;
+					cell.setCssStyles({ backgroundColor: settings.emptyColor });
 				}
 
 				if (isFuture) {
@@ -165,7 +159,9 @@ export class HeatmapView extends ItemView {
 				const count = plugin.countForDay(key, folder);
 				const level = plugin.intensityLevel(count);
 				if (level > 0) {
-					cell.style.backgroundColor = levelColor(settings.baseColor, level);
+					cell.setCssStyles({
+						backgroundColor: levelColor(settings.baseColor, level),
+					});
 				}
 				if (key === todayKey) cell.addClass("vah-today");
 
@@ -183,10 +179,12 @@ export class HeatmapView extends ItemView {
 		for (let level = 0; level <= 4; level++) {
 			const swatch = legend.createDiv({ cls: "vah-cell vah-legend-swatch" });
 			if (level === 0 && settings.emptyColor) {
-				swatch.style.backgroundColor = settings.emptyColor;
+				swatch.setCssStyles({ backgroundColor: settings.emptyColor });
 			}
 			if (level > 0) {
-				swatch.style.backgroundColor = levelColor(settings.baseColor, level);
+				swatch.setCssStyles({
+					backgroundColor: levelColor(settings.baseColor, level),
+				});
 			}
 		}
 		legend.createSpan({ text: "More" });
@@ -194,7 +192,7 @@ export class HeatmapView extends ItemView {
 		this.detailEl = container.createDiv({ cls: "vah-detail" });
 		void this.showDetail(this.lastDetailKey ?? todayKey, folder);
 
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			scroll.scrollLeft = scroll.scrollWidth;
 		});
 	}
@@ -206,13 +204,15 @@ export class HeatmapView extends ItemView {
 	private applyPanelTheme(shell: HTMLElement) {
 		const s = this.plugin.settings;
 
-		if (s.panelBgColor) shell.style.backgroundColor = s.panelBgColor;
+		if (s.panelBgColor) shell.setCssStyles({ backgroundColor: s.panelBgColor });
 		if (s.panelTextColor) {
 			const [r, g, b] = hexToRgb(s.panelTextColor);
-			shell.style.color = `rgb(${r}, ${g}, ${b})`;
-			shell.style.setProperty("--text-normal", `rgb(${r}, ${g}, ${b})`);
-			shell.style.setProperty("--text-muted", `rgba(${r}, ${g}, ${b}, 0.75)`);
-			shell.style.setProperty("--text-faint", `rgba(${r}, ${g}, ${b}, 0.55)`);
+			shell.setCssStyles({ color: `rgb(${r}, ${g}, ${b})` });
+			shell.setCssProps({
+				"--text-normal": `rgb(${r}, ${g}, ${b})`,
+				"--text-muted": `rgba(${r}, ${g}, ${b}, 0.75)`,
+				"--text-faint": `rgba(${r}, ${g}, ${b}, 0.55)`,
+			});
 		}
 
 		const url = this.plugin.resolveBackdropUrl(s.backdropPath);
@@ -233,12 +233,16 @@ export class HeatmapView extends ItemView {
 			media = backdrop.createEl("img", { attr: { src: url } });
 		}
 		if (s.backdropBlur > 0) {
-			media.style.filter = `blur(${s.backdropBlur}px)`;
-			// Oversize slightly so blurred edges do not show the background.
-			media.style.transform = "scale(1.06)";
+			media.setCssStyles({
+				filter: `blur(${s.backdropBlur}px)`,
+				// Oversize slightly so blurred edges do not show the background.
+				transform: "scale(1.06)",
+			});
 		}
 		const dim = backdrop.createDiv({ cls: "vah-backdrop-dim" });
-		dim.style.backgroundColor = `rgba(0, 0, 0, ${s.backdropDim})`;
+		dim.setCssStyles({
+			backgroundColor: `rgba(0, 0, 0, ${s.backdropDim})`,
+		});
 	}
 
 	/** Right-click menu: add a task to / open the day's reflection note. */

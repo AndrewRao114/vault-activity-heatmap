@@ -10,6 +10,7 @@ import type VaultActivityHeatmapPlugin from "../main";
 import type { Metric } from "../types";
 import { hexToRgbString, parseColorInput } from "../utils/color";
 import { momentFn, startOfToday, toDateKey } from "../utils/date";
+import { ConfirmClearHistoryModal } from "./confirm-clear-history-modal";
 
 export class HeatmapSettingTab extends PluginSettingTab {
 	private plugin: VaultActivityHeatmapPlugin;
@@ -142,7 +143,6 @@ export class HeatmapSettingTab extends PluginSettingTab {
 				slider
 					.setLimits(8, 53, 1)
 					.setValue(this.plugin.settings.weeksToShow)
-					.setDynamicTooltip()
 					.onChange(async (value) => {
 						this.plugin.settings.weeksToShow = value;
 						await save();
@@ -186,7 +186,6 @@ export class HeatmapSettingTab extends PluginSettingTab {
 				slider
 					.setLimits(0, 90, 5)
 					.setValue(Math.round(this.plugin.settings.backdropDim * 100))
-					.setDynamicTooltip()
 					.onChange(async (value) => {
 						this.plugin.settings.backdropDim = value / 100;
 						await save();
@@ -200,7 +199,6 @@ export class HeatmapSettingTab extends PluginSettingTab {
 				slider
 					.setLimits(0, 20, 1)
 					.setValue(this.plugin.settings.backdropBlur)
-					.setDynamicTooltip()
 					.onChange(async (value) => {
 						this.plugin.settings.backdropBlur = value;
 						await save();
@@ -385,7 +383,6 @@ export class HeatmapSettingTab extends PluginSettingTab {
 				slider
 					.setLimits(5, 60, 5)
 					.setValue(this.plugin.settings.sessionGapMinutes)
-					.setDynamicTooltip()
 					.onChange(async (value) => {
 						this.plugin.settings.sessionGapMinutes = value;
 						await save();
@@ -560,13 +557,12 @@ export class HeatmapSettingTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn
 					.setButtonText("Clear")
-					.setWarning()
+					.setDestructive()
 					.onClick(() => {
-						if (confirm("Delete all recorded heatmap history?")) {
-							this.plugin.clearHistory();
-						}
+						new ConfirmClearHistoryModal(this.app, () =>
+							this.plugin.clearHistory()
+						).open();
 					})
 			);
 	}
 }
-

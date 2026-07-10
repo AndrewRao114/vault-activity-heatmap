@@ -3,6 +3,26 @@ import { Notice, TFile, requestUrl } from "obsidian";
 import type VaultActivityHeatmapPlugin from "../main";
 import { startOfToday, toDateKey, weekStartOf } from "../utils/date";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function parseAnthropicResponse(value: unknown): string {
+	if (!isRecord(value) || !Array.isArray(value.content)) return "";
+	return value.content
+		.map((block) =>
+			isRecord(block) && typeof block.text === "string" ? block.text : ""
+		)
+		.join("");
+}
+
+function parseOpenAiResponse(value: unknown): string {
+	if (!isRecord(value) || !Array.isArray(value.choices)) return "";
+	const first = value.choices[0];
+	if (!isRecord(first) || !isRecord(first.message)) return "";
+	return typeof first.message.content === "string" ? first.message.content : "";
+}
+
 export class AiSummaryService {
 	private aiRunning = false;
 
@@ -162,8 +182,7 @@ export class AiSummaryService {
 			if (res.status >= 300) {
 				throw new Error(`API error ${res.status}: ${res.text.slice(0, 200)}`);
 			}
-			const blocks = (res.json?.content ?? []) as Array<{ text?: string }>;
-			const text = blocks.map((b) => b.text ?? "").join("");
+			const text = parseAnthropicResponse(res.json as unknown);
 			if (!text.trim()) throw new Error("the model returned an empty response");
 			return text;
 		}
@@ -184,7 +203,7 @@ export class AiSummaryService {
 		if (res.status >= 300) {
 			throw new Error(`API error ${res.status}: ${res.text.slice(0, 200)}`);
 		}
-		const text = res.json?.choices?.[0]?.message?.content ?? "";
+		const text = parseOpenAiResponse(res.json as unknown);
 		if (!text.trim()) throw new Error("the model returned an empty response");
 		return text;
 	}
@@ -216,4 +235,3 @@ export class AiSummaryService {
 		return path;
 	}
 }
-

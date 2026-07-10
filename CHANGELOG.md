@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.3
+
+- Address Obsidian community-plugin review recommendations.
+- Raise `minAppVersion` to match the newest Obsidian API used by the plugin.
+- Replace deprecated and popout-unsafe API usage in the settings and heatmap UI.
+- Add GitHub Actions release asset provenance attestations.
+- Remove the README screenshot placeholder.
+- Remove the `builtin-modules` dev dependency and update `esbuild`.
+
 ## 1.3.2
 
 - Split the large plugin source into focused modules for public-review

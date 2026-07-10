@@ -35,11 +35,6 @@ needs attention.
   theme: RGB square colors, text/background overrides, image backdrops, and
   looping MP4/WebM video backdrops.
 
-## Screenshots
-
-Screenshots are coming soon. The current beta build is focused on getting the
-workflow solid before publishing polished preview media.
-
 ## Installation
 
 ### From Obsidian Community Plugins

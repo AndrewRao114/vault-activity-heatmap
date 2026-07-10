@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => VaultActivityHeatmapPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian9 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 
 // src/defaults.ts
 var VIEW_TYPE_HEATMAP = "vault-activity-heatmap";
@@ -301,6 +301,21 @@ var ActivityService = class {
 
 // src/services/ai-summary.ts
 var import_obsidian3 = require("obsidian");
+function isRecord(value) {
+  return typeof value === "object" && value !== null;
+}
+function parseAnthropicResponse(value) {
+  if (!isRecord(value) || !Array.isArray(value.content)) return "";
+  return value.content.map(
+    (block) => isRecord(block) && typeof block.text === "string" ? block.text : ""
+  ).join("");
+}
+function parseOpenAiResponse(value) {
+  if (!isRecord(value) || !Array.isArray(value.choices)) return "";
+  const first = value.choices[0];
+  if (!isRecord(first) || !isRecord(first.message)) return "";
+  return typeof first.message.content === "string" ? first.message.content : "";
+}
 var AiSummaryService = class {
   constructor(plugin) {
     this.plugin = plugin;
@@ -450,8 +465,7 @@ ${excerpt}`);
       if (res2.status >= 300) {
         throw new Error(`API error ${res2.status}: ${res2.text.slice(0, 200)}`);
       }
-      const blocks = res2.json?.content ?? [];
-      const text2 = blocks.map((b) => b.text ?? "").join("");
+      const text2 = parseAnthropicResponse(res2.json);
       if (!text2.trim()) throw new Error("the model returned an empty response");
       return text2;
     }
@@ -472,7 +486,7 @@ ${excerpt}`);
     if (res.status >= 300) {
       throw new Error(`API error ${res.status}: ${res.text.slice(0, 200)}`);
     }
-    const text = res.json?.choices?.[0]?.message?.content ?? "";
+    const text = parseOpenAiResponse(res.json);
     if (!text.trim()) throw new Error("the model returned an empty response");
     return text;
   }
@@ -804,7 +818,7 @@ var HeatmapView = class extends import_obsidian7.ItemView {
     this.render();
   }
   render() {
-    const active = document.activeElement;
+    const active = activeDocument.activeElement;
     if (active instanceof HTMLInputElement && this.contentEl.contains(active)) {
       this.pendingRender = true;
       return;
@@ -885,7 +899,7 @@ var HeatmapView = class extends import_obsidian7.ItemView {
         const key = toDateKey(cursor);
         const isFuture = cursor.getTime() > today.getTime();
         if (settings.emptyColor) {
-          cell.style.backgroundColor = settings.emptyColor;
+          cell.setCssStyles({ backgroundColor: settings.emptyColor });
         }
         if (isFuture) {
           cell.addClass("vah-future");
@@ -897,7 +911,9 @@ var HeatmapView = class extends import_obsidian7.ItemView {
         const count = plugin.countForDay(key, folder);
         const level = plugin.intensityLevel(count);
         if (level > 0) {
-          cell.style.backgroundColor = levelColor(settings.baseColor, level);
+          cell.setCssStyles({
+            backgroundColor: levelColor(settings.baseColor, level)
+          });
         }
         if (key === todayKey) cell.addClass("vah-today");
         const noun = settings.metric === "edits" ? "edits" : "notes";
@@ -912,16 +928,18 @@ var HeatmapView = class extends import_obsidian7.ItemView {
     for (let level = 0; level <= 4; level++) {
       const swatch = legend.createDiv({ cls: "vah-cell vah-legend-swatch" });
       if (level === 0 && settings.emptyColor) {
-        swatch.style.backgroundColor = settings.emptyColor;
+        swatch.setCssStyles({ backgroundColor: settings.emptyColor });
       }
       if (level > 0) {
-        swatch.style.backgroundColor = levelColor(settings.baseColor, level);
+        swatch.setCssStyles({
+          backgroundColor: levelColor(settings.baseColor, level)
+        });
       }
     }
     legend.createSpan({ text: "More" });
     this.detailEl = container.createDiv({ cls: "vah-detail" });
     void this.showDetail(this.lastDetailKey ?? todayKey, folder);
-    requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
       scroll.scrollLeft = scroll.scrollWidth;
     });
   }
@@ -931,13 +949,15 @@ var HeatmapView = class extends import_obsidian7.ItemView {
    */
   applyPanelTheme(shell) {
     const s = this.plugin.settings;
-    if (s.panelBgColor) shell.style.backgroundColor = s.panelBgColor;
+    if (s.panelBgColor) shell.setCssStyles({ backgroundColor: s.panelBgColor });
     if (s.panelTextColor) {
       const [r, g, b] = hexToRgb(s.panelTextColor);
-      shell.style.color = `rgb(${r}, ${g}, ${b})`;
-      shell.style.setProperty("--text-normal", `rgb(${r}, ${g}, ${b})`);
-      shell.style.setProperty("--text-muted", `rgba(${r}, ${g}, ${b}, 0.75)`);
-      shell.style.setProperty("--text-faint", `rgba(${r}, ${g}, ${b}, 0.55)`);
+      shell.setCssStyles({ color: `rgb(${r}, ${g}, ${b})` });
+      shell.setCssProps({
+        "--text-normal": `rgb(${r}, ${g}, ${b})`,
+        "--text-muted": `rgba(${r}, ${g}, ${b}, 0.75)`,
+        "--text-faint": `rgba(${r}, ${g}, ${b}, 0.55)`
+      });
     }
     const url = this.plugin.resolveBackdropUrl(s.backdropPath);
     if (!url) return;
@@ -957,11 +977,16 @@ var HeatmapView = class extends import_obsidian7.ItemView {
       media = backdrop.createEl("img", { attr: { src: url } });
     }
     if (s.backdropBlur > 0) {
-      media.style.filter = `blur(${s.backdropBlur}px)`;
-      media.style.transform = "scale(1.06)";
+      media.setCssStyles({
+        filter: `blur(${s.backdropBlur}px)`,
+        // Oversize slightly so blurred edges do not show the background.
+        transform: "scale(1.06)"
+      });
     }
     const dim = backdrop.createDiv({ cls: "vah-backdrop-dim" });
-    dim.style.backgroundColor = `rgba(0, 0, 0, ${s.backdropDim})`;
+    dim.setCssStyles({
+      backgroundColor: `rgba(0, 0, 0, ${s.backdropDim})`
+    });
   }
   /** Right-click menu: add a task to / open the day's reflection note. */
   attachCellMenu(cell, dateKey) {
@@ -1160,8 +1185,36 @@ var HeatmapView = class extends import_obsidian7.ItemView {
 };
 
 // src/ui/settings-tab.ts
+var import_obsidian9 = require("obsidian");
+
+// src/ui/confirm-clear-history-modal.ts
 var import_obsidian8 = require("obsidian");
-var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
+var ConfirmClearHistoryModal = class extends import_obsidian8.Modal {
+  constructor(app, onConfirm) {
+    super(app);
+    this.onConfirm = onConfirm;
+  }
+  onOpen() {
+    this.titleEl.setText("Clear heatmap history?");
+    this.contentEl.createEl("p", {
+      text: "This deletes every recorded activity day for Vault Activity Heatmap. Your notes are not changed, but this history cannot be restored from inside the plugin."
+    });
+    new import_obsidian8.Setting(this.contentEl).addButton(
+      (button) => button.setButtonText("Cancel").onClick(() => this.close())
+    ).addButton(
+      (button) => button.setButtonText("Clear history").setDestructive().onClick(() => {
+        this.close();
+        this.onConfirm();
+      })
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+// src/ui/settings-tab.ts
+var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1173,11 +1226,11 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
       await this.plugin.persist();
       this.plugin.renderAllViews();
     };
-    new import_obsidian8.Setting(containerEl).setName("Appearance").setHeading();
+    new import_obsidian9.Setting(containerEl).setName("Appearance").setHeading();
     let baseColorPicker = null;
     let baseColorText = null;
     let syncingBaseColor = false;
-    new import_obsidian8.Setting(containerEl).setName("Square color").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Square color").setDesc(
       "Base color of the heatmap squares. Pick it, or type an RGB value like 64, 196, 99 (or a hex code like #40c463)."
     ).addColorPicker((picker) => {
       baseColorPicker = picker;
@@ -1201,7 +1254,7 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian8.Setting(containerEl).setName("Empty square color").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Empty square color").setDesc(
       "Color for days without activity, as RGB or hex. Leave blank to use the theme default."
     ).addText((text) => {
       text.setPlaceholder("theme default").setValue(
@@ -1219,7 +1272,7 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian8.Setting(containerEl).setName("Metric").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Metric").setDesc(
       "What a day's intensity is based on: how many distinct notes you touched, or the total number of edits."
     ).addDropdown(
       (dd) => dd.addOption("files", "Unique notes per day").addOption("edits", "Total edits per day").setValue(this.plugin.settings.metric).onChange(async (value) => {
@@ -1227,7 +1280,7 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Intensity thresholds").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Intensity thresholds").setDesc(
       "Four ascending numbers, comma separated. Example with '1, 3, 6, 10': 1-2 -> lightest, 3-5 -> light, 6-9 -> dark, 10+ -> darkest."
     ).addText(
       (text) => text.setPlaceholder("1, 3, 6, 10").setValue(this.plugin.settings.thresholds.join(", ")).onChange(async (value) => {
@@ -1238,20 +1291,20 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         }
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Weeks to show").setDesc("Width of the heatmap in weeks (26 = half a year, 53 = a full year).").addSlider(
-      (slider) => slider.setLimits(8, 53, 1).setValue(this.plugin.settings.weeksToShow).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian9.Setting(containerEl).setName("Weeks to show").setDesc("Width of the heatmap in weeks (26 = half a year, 53 = a full year).").addSlider(
+      (slider) => slider.setLimits(8, 53, 1).setValue(this.plugin.settings.weeksToShow).onChange(async (value) => {
         this.plugin.settings.weeksToShow = value;
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Week starts on").addDropdown(
+    new import_obsidian9.Setting(containerEl).setName("Week starts on").addDropdown(
       (dd) => dd.addOption("1", "Monday").addOption("0", "Sunday").setValue(String(this.plugin.settings.firstDayOfWeek)).onChange(async (value) => {
         this.plugin.settings.firstDayOfWeek = parseInt(value, 10);
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Panel theme").setHeading();
-    new import_obsidian8.Setting(containerEl).setName("Backdrop image or video").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Panel theme").setHeading();
+    new import_obsidian9.Setting(containerEl).setName("Backdrop image or video").setDesc(
       "Vault path (e.g. assets/wall.png or clips/loop.mp4) or an https:// URL. Images (PNG/JPG/GIF/WebP) and auto-looping muted videos (MP4/WebM) are supported. Leave blank for none."
     ).addText(
       (text) => text.setPlaceholder("assets/backdrop.mp4").setValue(this.plugin.settings.backdropPath).onChange(async (value) => {
@@ -1259,19 +1312,19 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Backdrop dim").setDesc("Darkens the backdrop so the heatmap stays readable.").addSlider(
-      (slider) => slider.setLimits(0, 90, 5).setValue(Math.round(this.plugin.settings.backdropDim * 100)).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian9.Setting(containerEl).setName("Backdrop dim").setDesc("Darkens the backdrop so the heatmap stays readable.").addSlider(
+      (slider) => slider.setLimits(0, 90, 5).setValue(Math.round(this.plugin.settings.backdropDim * 100)).onChange(async (value) => {
         this.plugin.settings.backdropDim = value / 100;
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Backdrop blur").setDesc("Blur radius in pixels applied to the backdrop.").addSlider(
-      (slider) => slider.setLimits(0, 20, 1).setValue(this.plugin.settings.backdropBlur).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian9.Setting(containerEl).setName("Backdrop blur").setDesc("Blur radius in pixels applied to the backdrop.").addSlider(
+      (slider) => slider.setLimits(0, 20, 1).setValue(this.plugin.settings.backdropBlur).onChange(async (value) => {
         this.plugin.settings.backdropBlur = value;
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Panel text color").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Panel text color").setDesc(
       "Overrides the panel's text color only (RGB or hex). Leave blank for the theme default."
     ).addText((text) => {
       text.setPlaceholder("theme default").setValue(
@@ -1289,7 +1342,7 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian8.Setting(containerEl).setName("Panel background color").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Panel background color").setDesc(
       "Overrides the panel's background only (RGB or hex). Leave blank for the theme default."
     ).addText((text) => {
       text.setPlaceholder("theme default").setValue(
@@ -1307,8 +1360,8 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian8.Setting(containerEl).setName("Tracking").setHeading();
-    new import_obsidian8.Setting(containerEl).setName("Excluded folders").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Tracking").setHeading();
+    new import_obsidian9.Setting(containerEl).setName("Excluded folders").setDesc(
       "Folders that should never count as activity (e.g. templates). One folder path per line."
     ).addTextArea(
       (text) => text.setPlaceholder("templates\narchive/old").setValue(this.plugin.settings.excludeFolders.join("\n")).onChange(async (value) => {
@@ -1316,8 +1369,8 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Daily reflection notes").setHeading();
-    new import_obsidian8.Setting(containerEl).setName("Reflection folder").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Daily reflection notes").setHeading();
+    new import_obsidian9.Setting(containerEl).setName("Reflection folder").setDesc(
       "Folder where daily reflection notes are created when you right-click a square. Leave blank for the vault root."
     ).addText(
       (text) => text.setPlaceholder("Daily reflection").setValue(this.plugin.settings.reflectionFolder).onChange(async (value) => {
@@ -1325,7 +1378,7 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Note name format").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Note name format").setDesc(
       `Date format for the note file name (moment.js syntax). "YYYY-MM-DD" -> ${momentFn().format(
         "YYYY-MM-DD"
       )}.md`
@@ -1335,7 +1388,7 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Tasks heading").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Tasks heading").setDesc(
       'Heading the task is inserted under, e.g. "## Tasks". Created if missing. Leave blank to append tasks at the end of the note.'
     ).addText(
       (text) => text.setPlaceholder("## Tasks").setValue(this.plugin.settings.taskHeading).onChange(async (value) => {
@@ -1343,8 +1396,8 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Day detail").setHeading();
-    new import_obsidian8.Setting(containerEl).setName("Show tasks").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Day detail").setHeading();
+    new import_obsidian9.Setting(containerEl).setName("Show tasks").setDesc(
       "To Do-style task list for the selected day, backed by its daily reflection note."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTasks).onChange(async (value) => {
@@ -1352,7 +1405,7 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Notes edited: path display").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Notes edited: path display").setDesc(
       "Show just the file name (cleaner) or the full folder path in the 'Notes edited' list. You can also flip this with the button on the list itself."
     ).addDropdown(
       (dd) => dd.addOption("name", "File name only").addOption("full", "Full folder path").setValue(this.plugin.settings.notesPathDisplay).onChange(async (value) => {
@@ -1360,7 +1413,7 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Show edit timeline").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Show edit timeline").setDesc(
       "Chronological trail of when each note was edited that day and by how much."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTimeline).onChange(async (value) => {
@@ -1368,22 +1421,22 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Timeline session gap").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Timeline session gap").setDesc(
       "Saves of the same note within this many minutes merge into one timeline entry."
     ).addSlider(
-      (slider) => slider.setLimits(5, 60, 5).setValue(this.plugin.settings.sessionGapMinutes).setDynamicTooltip().onChange(async (value) => {
+      (slider) => slider.setLimits(5, 60, 5).setValue(this.plugin.settings.sessionGapMinutes).onChange(async (value) => {
         this.plugin.settings.sessionGapMinutes = value;
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("AI summaries & notifications").setHeading();
-    new import_obsidian8.Setting(containerEl).setName("Provider").setDesc("Which API the weekly/monthly writing summaries are generated with.").addDropdown(
+    new import_obsidian9.Setting(containerEl).setName("AI summaries & notifications").setHeading();
+    new import_obsidian9.Setting(containerEl).setName("Provider").setDesc("Which API the weekly/monthly writing summaries are generated with.").addDropdown(
       (dd) => dd.addOption("anthropic", "Anthropic (Claude)").addOption("openai", "OpenAI-compatible").setValue(this.plugin.settings.aiProvider).onChange(async (value) => {
         this.plugin.settings.aiProvider = value;
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("API key").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("API key").setDesc(
       "Stored in this plugin's data.json inside your vault - do not share that file."
     ).addText((text) => {
       text.setPlaceholder("sk-...").setValue(this.plugin.settings.aiApiKey).onChange(async (value) => {
@@ -1392,43 +1445,43 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
       });
       text.inputEl.type = "password";
     });
-    new import_obsidian8.Setting(containerEl).setName("Model").setDesc("Blank uses the provider default (claude-sonnet-5 / gpt-4o-mini).").addText(
+    new import_obsidian9.Setting(containerEl).setName("Model").setDesc("Blank uses the provider default (claude-sonnet-5 / gpt-4o-mini).").addText(
       (text) => text.setPlaceholder("claude-sonnet-5").setValue(this.plugin.settings.aiModel).onChange(async (value) => {
         this.plugin.settings.aiModel = value.trim();
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("API base URL").setDesc("Optional override for proxies or self-hosted gateways.").addText(
+    new import_obsidian9.Setting(containerEl).setName("API base URL").setDesc("Optional override for proxies or self-hosted gateways.").addText(
       (text) => text.setPlaceholder("https://api.anthropic.com").setValue(this.plugin.settings.aiBaseUrl).onChange(async (value) => {
         this.plugin.settings.aiBaseUrl = value.trim();
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Summary folder").setDesc("Where generated summary notes are saved.").addText(
+    new import_obsidian9.Setting(containerEl).setName("Summary folder").setDesc("Where generated summary notes are saved.").addText(
       (text) => text.setPlaceholder("AI summaries").setValue(this.plugin.settings.aiSummaryFolder).onChange(async (value) => {
         this.plugin.settings.aiSummaryFolder = value;
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Auto-summarize each week").setDesc("When a new week starts, the completed week is summarized automatically.").addToggle(
+    new import_obsidian9.Setting(containerEl).setName("Auto-summarize each week").setDesc("When a new week starts, the completed week is summarized automatically.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.aiAutoWeekly).onChange(async (value) => {
         this.plugin.settings.aiAutoWeekly = value;
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Auto-summarize each month").setDesc("When a new month starts, the completed month is summarized automatically.").addToggle(
+    new import_obsidian9.Setting(containerEl).setName("Auto-summarize each month").setDesc("When a new month starts, the completed month is summarized automatically.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.aiAutoMonthly).onChange(async (value) => {
         this.plugin.settings.aiAutoMonthly = value;
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Desktop notification").setDesc("Show a system notification on this computer when a summary is ready.").addToggle(
+    new import_obsidian9.Setting(containerEl).setName("Desktop notification").setDesc("Show a system notification on this computer when a summary is ready.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.notifyDesktop).onChange(async (value) => {
         this.plugin.settings.notifyDesktop = value;
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Phone notification webhook").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("Phone notification webhook").setDesc(
       "POST endpoint pinged when a summary is ready. Easiest setup: install the free ntfy app on your phone, subscribe to a private topic, and enter https://ntfy.sh/your-topic here."
     ).addText(
       (text) => text.setPlaceholder("https://ntfy.sh/your-topic").setValue(this.plugin.settings.notifyWebhook).onChange(async (value) => {
@@ -1436,7 +1489,7 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("Run now").setDesc("Generate a summary of the current period immediately.").addButton(
+    new import_obsidian9.Setting(containerEl).setName("Run now").setDesc("Generate a summary of the current period immediately.").addButton(
       (btn) => btn.setButtonText("This week").onClick(() => {
         const start = this.plugin.weekStartOf(/* @__PURE__ */ new Date());
         void this.plugin.summarizePeriod(
@@ -1460,24 +1513,25 @@ var HeatmapSettingTab = class extends import_obsidian8.PluginSettingTab {
         );
       })
     );
-    new import_obsidian8.Setting(containerEl).setName("History").setHeading();
-    new import_obsidian8.Setting(containerEl).setName("Backfill from existing notes").setDesc(
+    new import_obsidian9.Setting(containerEl).setName("History").setHeading();
+    new import_obsidian9.Setting(containerEl).setName("Backfill from existing notes").setDesc(
       "Seed the heatmap from every note's created and last-modified dates. Safe to run repeatedly - it never overwrites live tracking data."
     ).addButton(
       (btn) => btn.setButtonText("Backfill").onClick(() => this.plugin.backfillFromFileStats())
     );
-    new import_obsidian8.Setting(containerEl).setName("Clear all history").setDesc("Deletes every recorded day. This cannot be undone.").addButton(
-      (btn) => btn.setButtonText("Clear").setWarning().onClick(() => {
-        if (confirm("Delete all recorded heatmap history?")) {
-          this.plugin.clearHistory();
-        }
+    new import_obsidian9.Setting(containerEl).setName("Clear all history").setDesc("Deletes every recorded day. This cannot be undone.").addButton(
+      (btn) => btn.setButtonText("Clear").setDestructive().onClick(() => {
+        new ConfirmClearHistoryModal(
+          this.app,
+          () => this.plugin.clearHistory()
+        ).open();
       })
     );
   }
 };
 
 // src/main.ts
-var VaultActivityHeatmapPlugin = class extends import_obsidian9.Plugin {
+var VaultActivityHeatmapPlugin = class extends import_obsidian10.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
@@ -1614,8 +1668,8 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian9.Plugin {
     const s = setting.trim();
     if (!s) return null;
     if (/^https?:\/\//i.test(s)) return s;
-    const f = this.app.vault.getAbstractFileByPath((0, import_obsidian9.normalizePath)(s));
-    if (f instanceof import_obsidian9.TFile) return this.app.vault.getResourcePath(f);
+    const f = this.app.vault.getAbstractFileByPath((0, import_obsidian10.normalizePath)(s));
+    if (f instanceof import_obsidian10.TFile) return this.app.vault.getResourcePath(f);
     return null;
   }
   async activateView() {
@@ -1626,7 +1680,7 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian9.Plugin {
     }
     const leaf = this.app.workspace.getRightLeaf(false);
     if (!leaf) {
-      new import_obsidian9.Notice("Heatmap: could not open the right sidebar.");
+      new import_obsidian10.Notice("Heatmap: could not open the right sidebar.");
       return;
     }
     await leaf.setViewState({ type: VIEW_TYPE_HEATMAP, active: true });
