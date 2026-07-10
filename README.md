@@ -13,6 +13,20 @@ and the day lights up faintly; work across a folder or ten notes and the square
 gets darker. Click a day to see what changed, what you planned, and what still
 needs attention.
 
+## Screenshots
+
+### Heatmap and day detail
+
+![Vault Activity Heatmap showing a selected day with tasks, edited notes, and an edit timeline](assets/screenshots/heatmap-day-detail.png)
+
+### Appearance settings
+
+![Appearance settings for RGB heatmap colors and panel backdrops](assets/screenshots/appearance-settings.png)
+
+### AI summaries and notifications
+
+![AI summaries and notifications settings for provider, API key, and automatic summaries](assets/screenshots/ai-summaries-settings.png)
+
 ## Highlights
 
 - **Daily activity heatmap** - one square per day, darker when you write more.
@@ -141,7 +155,6 @@ Release assets are the three compiled plugin files:
 
 ## Roadmap
 
-- Polished screenshot gallery
 - Additional summary providers
 - Optional summary templates
 - Better mobile-specific layout tuning
