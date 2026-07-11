@@ -5,10 +5,21 @@ import type { SessionRecord } from "../types";
 import { toDateKey } from "../utils/date";
 import { isUnderFolder } from "../utils/path";
 
+const EDIT_IDLE_MS = 1200;
+const EDIT_MAX_MS = 5000;
+
+interface PendingEditorChange {
+	file: TFile;
+	text: string;
+	startedAt: number;
+	timer: number;
+}
+
 export class ActivityService {
 	/** Last known file sizes, for timeline byte deltas. */
 	private lastSizes = new Map<string, number>();
-	private requestSave = debounce(() => void this.plugin.persist(), 3000, true);
+	private pendingEditorChanges = new Map<string, PendingEditorChange>();
+	private suppressEditorUntil = new Map<string, number>();
 	private refreshViews = debounce(() => this.plugin.renderAllViews(), 600, true);
 
 	constructor(private plugin: VaultActivityHeatmapPlugin) {}
@@ -19,6 +30,72 @@ export class ActivityService {
 		}
 	}
 
+	recordEditorChange(file: TFile, text: string) {
+		if (!this.isTracked(file)) return;
+		const textSize = new TextEncoder().encode(text).byteLength;
+		if ((this.suppressEditorUntil.get(file.path) ?? 0) > Date.now()) {
+			this.lastSizes.set(file.path, textSize);
+			return;
+		}
+		this.suppressEditorUntil.delete(file.path);
+		const now = Date.now();
+		const existing = this.pendingEditorChanges.get(file.path);
+		if (existing) {
+			window.clearTimeout(existing.timer);
+			existing.file = file;
+			existing.text = text;
+			if (now - existing.startedAt >= EDIT_MAX_MS) {
+				this.flushEditorChange(file.path);
+				return;
+			}
+			existing.timer = window.setTimeout(
+				() => this.flushEditorChange(file.path),
+				EDIT_IDLE_MS
+			);
+			return;
+		}
+		this.pendingEditorChanges.set(file.path, {
+			file,
+			text,
+			startedAt: now,
+			timer: window.setTimeout(() => this.flushEditorChange(file.path), EDIT_IDLE_MS),
+		});
+	}
+
+	beginLocalMutation(file: TFile) {
+		if (this.pendingEditorChanges.has(file.path)) {
+			this.flushEditorChange(file.path);
+		}
+		this.suppressEditorUntil.set(file.path, Date.now() + 750);
+	}
+
+	recordLocalMutation(file: TFile, isCreate: boolean, content: string) {
+		this.beginLocalMutation(file);
+		this.recordActivity(
+			file,
+			isCreate,
+			new TextEncoder().encode(content).byteLength
+		);
+	}
+
+	private flushEditorChange(path: string) {
+		const pending = this.pendingEditorChanges.get(path);
+		if (!pending) return;
+		window.clearTimeout(pending.timer);
+		this.pendingEditorChanges.delete(path);
+		const isCreate =
+			!this.lastSizes.has(path) && Date.now() - pending.file.stat.ctime < 30_000;
+		const size = new TextEncoder().encode(pending.text).byteLength;
+		this.recordActivity(pending.file, isCreate, size);
+	}
+
+	stop() {
+		for (const path of [...this.pendingEditorChanges.keys()]) {
+			this.flushEditorChange(path);
+		}
+		this.suppressEditorUntil.clear();
+	}
+
 	isTracked(file: TAbstractFile): file is TFile {
 		if (!(file instanceof TFile) || file.extension !== "md") return false;
 		for (const folder of this.plugin.settings.excludeFolders) {
@@ -27,16 +104,17 @@ export class ActivityService {
 		return true;
 	}
 
-	recordActivity(file: TAbstractFile, isCreate = false) {
+	recordActivity(file: TAbstractFile, isCreate = false, sizeOverride?: number) {
 		if (!this.isTracked(file)) return;
 		const now = Date.now();
 		const key = toDateKey(new Date());
-		const day = (this.plugin.activity.days[key] ??= { edits: 0, files: {} });
+		const days = this.plugin.sync.getLocalShard().days;
+		const day = (days[key] ??= { edits: 0, files: {} });
 		day.edits += 1;
 		day.files[file.path] = (day.files[file.path] ?? 0) + 1;
 
-		// timeline: merge rapid saves of the same note into one session
-		const newSize = file.stat.size;
+		// Timeline pulses represent local editor changes, merged into a session.
+		const newSize = sizeOverride ?? file.stat.size;
 		const prevSize = this.lastSizes.get(file.path);
 		const delta = prevSize === undefined ? (isCreate ? newSize : 0) : newSize - prevSize;
 		this.lastSizes.set(file.path, newSize);
@@ -45,8 +123,9 @@ export class ActivityService {
 		const gapMs = Math.max(1, this.plugin.settings.sessionGapMinutes) * 60_000;
 		let last: SessionRecord | undefined;
 		for (let i = sessions.length - 1; i >= 0; i--) {
-			if (sessions[i].f === file.path) {
-				last = sessions[i];
+			const session = sessions[i];
+			if (session?.f === file.path) {
+				last = session;
 				break;
 			}
 		}
@@ -65,36 +144,39 @@ export class ActivityService {
 			last.d += delta;
 		}
 
-		this.requestSave();
+		this.plugin.sync.touchActivity();
 		this.refreshViews();
 	}
 
 	/** Keep history consistent when files are renamed or moved. */
 	migratePath(file: TAbstractFile, oldPath: string) {
-		if (!(file instanceof TFile)) return;
-		let changed = false;
-		for (const day of Object.values(this.plugin.activity.days)) {
-			const count = day.files[oldPath];
-			if (count !== undefined) {
-				day.files[file.path] = (day.files[file.path] ?? 0) + count;
-				delete day.files[oldPath];
-				changed = true;
-			}
-			for (const session of day.sessions ?? []) {
-				if (session.f === oldPath) {
-					session.f = file.path;
-					changed = true;
-				}
-			}
+		if (file instanceof TFolder) {
+			this.plugin.sync.setPathAlias(`${oldPath.replace(/\/$/, "")}/`, `${file.path}/`);
+			return;
 		}
-		const size = this.lastSizes.get(oldPath);
-		if (size !== undefined) {
-			this.lastSizes.delete(oldPath);
-			this.lastSizes.set(file.path, size);
-		}
-		if (changed) {
-			this.requestSave();
-			this.refreshViews();
+		if (file instanceof TFile) {
+			const suppressedUntil = this.suppressEditorUntil.get(oldPath);
+			if (suppressedUntil !== undefined) {
+				this.suppressEditorUntil.delete(oldPath);
+				this.suppressEditorUntil.set(file.path, suppressedUntil);
+			}
+			const pending = this.pendingEditorChanges.get(oldPath);
+			if (pending) {
+				window.clearTimeout(pending.timer);
+				this.pendingEditorChanges.delete(oldPath);
+				pending.file = file;
+				pending.timer = window.setTimeout(
+					() => this.flushEditorChange(file.path),
+					EDIT_IDLE_MS
+				);
+				this.pendingEditorChanges.set(file.path, pending);
+			}
+			const size = this.lastSizes.get(oldPath);
+			if (size !== undefined) {
+				this.lastSizes.delete(oldPath);
+				this.lastSizes.set(file.path, size);
+			}
+			this.plugin.sync.setPathAlias(oldPath, file.path);
 		}
 	}
 
@@ -105,6 +187,7 @@ export class ActivityService {
 	 */
 	backfillFromFileStats() {
 		const files = this.plugin.app.vault.getMarkdownFiles();
+		const days = this.plugin.sync.getLocalShard().days;
 		let added = 0;
 		for (const file of files) {
 			if (!this.isTracked(file)) continue;
@@ -113,15 +196,19 @@ export class ActivityService {
 				toDateKey(new Date(file.stat.mtime)),
 			]);
 			for (const key of stamps) {
-				const day = (this.plugin.activity.days[key] ??= { edits: 0, files: {} });
-				if (day.files[file.path] === undefined) {
+				const day = (days[key] ??= { edits: 0, files: {} });
+				const aggregateDay = this.plugin.activity.days[key];
+				if (
+					day.files[file.path] === undefined &&
+					aggregateDay?.files[file.path] === undefined
+				) {
 					day.files[file.path] = 1;
 					day.edits += 1;
 					added += 1;
 				}
 			}
 		}
-		this.requestSave();
+		if (added > 0) this.plugin.sync.touchActivity();
 		this.refreshViews();
 		new Notice(
 			added > 0
@@ -131,9 +218,7 @@ export class ActivityService {
 	}
 
 	clearHistory() {
-		this.plugin.activity = { days: {} };
-		this.requestSave();
-		this.refreshViews();
+		this.plugin.sync.clearActivity();
 		new Notice("Heatmap history cleared.");
 	}
 
@@ -167,10 +252,11 @@ export class ActivityService {
 
 	intensityLevel(count: number): number {
 		if (count <= 0) return 0;
-		const t = this.plugin.settings.thresholds;
-		if (count >= t[3]) return 4;
-		if (count >= t[2]) return 3;
-		if (count >= t[1]) return 2;
+		const [, level2 = 3, level3 = 6, level4 = 10] =
+			this.plugin.settings.thresholds;
+		if (count >= level4) return 4;
+		if (count >= level3) return 3;
+		if (count >= level2) return 2;
 		return 1;
 	}
 

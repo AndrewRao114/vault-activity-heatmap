@@ -24,6 +24,9 @@ assignees: ""
 - Plugin version:
 - OS:
 - Sync method, if relevant:
+- Device role (source or destination), if relevant:
+- Was Obsidian foregrounded or backgrounded?:
+- Approximate local edit and remote arrival times:
 
 ## Extra context
 

@@ -6,16 +6,18 @@ export interface SessionRecord {
 	s: number;
 	/** epoch ms of the latest edit in the session */
 	e: number;
-	/** number of save events merged into this session */
+	/** number of debounced editor-change pulses merged into this session */
 	n: number;
 	/** net byte delta of the file across the session */
 	d: number;
 	/** set when the session started by creating the note */
 	k?: "create";
+	/** source device label, added only to the aggregated runtime projection */
+	v?: string;
 }
 
 export interface DayRecord {
-	/** Total number of save/edit events recorded that day. */
+	/** Total number of local editor-change pulses recorded that day. */
 	edits: number;
 	/** Map of file path -> number of edits to that file that day. */
 	files: Record<string, number>;
@@ -41,7 +43,7 @@ export interface HeatmapSettings {
 	excludeFolders: string[];
 	/** 0 = Sunday, 1 = Monday */
 	firstDayOfWeek: number;
-	/** Last folder filter chosen in the view; persisted for convenience. */
+	/** Last folder filter chosen in the view; stored only on this device. */
 	lastFolderFilter: string;
 	/** Folder where daily reflection notes live. */
 	reflectionFolder: string;
@@ -69,7 +71,8 @@ export interface HeatmapSettings {
 	panelBgColor: string;
 	/** AI provider for the weekly/monthly writing summaries. */
 	aiProvider: "anthropic" | "openai";
-	aiApiKey: string;
+	/** SecretStorage identifier containing the API key on this device. */
+	aiSecretId: string;
 	/** Model id; empty uses the provider default. */
 	aiModel: string;
 	/** API base URL override, for proxies/self-hosted gateways. */
@@ -84,15 +87,80 @@ export interface HeatmapSettings {
 	aiLastWeekly: string;
 	/** YYYY-MM of the last auto-summarized month. */
 	aiLastMonthly: string;
-	/** Show a desktop notification when a summary is ready. */
+	/** Show a desktop notification or mobile in-app notice on this device. */
 	notifyDesktop: boolean;
-	/** POST endpoint for phone notifications (e.g. https://ntfy.sh/your-topic). */
-	notifyWebhook: string;
+	/** SecretStorage identifier containing the notification webhook URL. */
+	notifySecretId: string;
 }
 
-export interface PersistedData {
-	settings: HeatmapSettings;
-	activity: ActivityData;
+/** Settings shared through the vault. Device-specific view state stays local. */
+export type SharedHeatmapSettings = Omit<
+	HeatmapSettings,
+	"lastFolderFilter" | "notifyDesktop" | "aiSecretId" | "notifySecretId"
+>;
+
+export interface VersionStamp {
+	/** Lamport clock used for deterministic last-writer-wins values. */
+	clock: number;
+	deviceId: string;
+	updatedAt: number;
+}
+
+export interface VersionedValue<T> {
+	value: T;
+	stamp: VersionStamp;
+}
+
+/** One device-owned activity shard. Only its owning device increments revision. */
+export interface ActivityShard {
+	deviceId: string;
+	deviceName: string;
+	epoch: string;
+	revision: number;
+	updatedAt: number;
+	days: Record<string, DayRecord>;
+}
+
+/** Conflict-safe state synchronized by the user's existing vault provider. */
+export interface PersistedDataV2 {
+	schemaVersion: 2;
+	settings: VersionedValue<SharedHeatmapSettings>;
+	activityEpoch: VersionedValue<string>;
+	activityShards: Record<string, ActivityShard>;
+	pathAliases: Record<string, VersionedValue<string>>;
+	selectedDay: VersionedValue<string>;
+	automationDeviceId: VersionedValue<string>;
+}
+
+/** v1.3 and earlier data.json shape, accepted only by the migration path. */
+export interface LegacyPersistedData {
+	settings?: Partial<HeatmapSettings> & {
+		aiApiKey?: string;
+		notifyWebhook?: string;
+	};
+	activity?: ActivityData;
+}
+
+/** State that intentionally remains local to one Obsidian installation. */
+export interface LocalDeviceState {
+	deviceId: string;
+	deviceName: string;
+	lastFolderFilter: string;
+	notifyDesktop: boolean;
+	aiSecretId: string;
+	notifySecretId: string;
+}
+
+/** Device-local recovery envelope for the installation's own shard. */
+export interface LocalShardBackup {
+	schemaVersion: 1;
+	activityEpoch: VersionedValue<string>;
+	shard: ActivityShard;
+}
+
+export interface LegacySecrets {
+	aiApiKey: string;
+	notifyWebhook: string;
 }
 
 /** A checkbox task parsed out of a daily reflection note. */

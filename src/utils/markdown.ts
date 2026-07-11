@@ -10,10 +10,10 @@ export function normalizeHeadingText(text: string): string {
 export function nonHeadingLines(lines: string[]): boolean[] {
 	const ignored = new Array<boolean>(lines.length).fill(false);
 	let start = 0;
-	if (lines.length > 0 && lines[0].trim() === "---") {
+	if (lines[0]?.trim() === "---") {
 		let close = -1;
 		for (let j = 1; j < lines.length; j++) {
-			const t = lines[j].trim();
+			const t = lines[j]?.trim() ?? "";
 			if (t === "---" || t === "...") {
 				close = j;
 				break;
@@ -27,16 +27,18 @@ export function nonHeadingLines(lines: string[]): boolean[] {
 	let fenceChar = "";
 	let fenceLen = 0;
 	for (let i = start; i < lines.length; i++) {
-		const t = lines[i].trimStart();
+		const t = lines[i]?.trimStart() ?? "";
 		if (fenceChar) {
 			ignored[i] = true;
 			const m = t.match(/^(`{3,}|~{3,})\s*$/);
-			if (m && m[1][0] === fenceChar && m[1].length >= fenceLen) fenceChar = "";
+			const fence = m?.[1];
+			if (fence?.[0] === fenceChar && fence.length >= fenceLen) fenceChar = "";
 		} else {
 			const m = t.match(/^(`{3,}|~{3,})/);
-			if (m) {
-				fenceChar = m[1][0];
-				fenceLen = m[1].length;
+			const fence = m?.[1];
+			if (fence?.[0]) {
+				fenceChar = fence[0];
+				fenceLen = fence.length;
 				ignored[i] = true;
 			}
 		}
@@ -67,8 +69,9 @@ export function insertUnderHeading(
 	let idx = -1;
 	for (let i = 0; i < lines.length; i++) {
 		if (skip[i]) continue;
-		const m = lines[i].match(/^#{1,6}\s+(.*)$/);
-		if (m && normalizeHeadingText(m[1]) === headingText) {
+		const m = lines[i]?.match(/^#{1,6}\s+(.*)$/);
+		const text = m?.[1];
+		if (text !== undefined && normalizeHeadingText(text) === headingText) {
 			idx = i;
 			break;
 		}
@@ -81,14 +84,14 @@ export function insertUnderHeading(
 	let end = lines.length;
 	for (let i = idx + 1; i < lines.length; i++) {
 		if (skip[i]) continue;
-		if (/^#{1,6}\s/.test(lines[i])) {
+		if (/^#{1,6}\s/.test(lines[i] ?? "")) {
 			end = i;
 			break;
 		}
 	}
 	// skip back over trailing blank lines so the task joins the list
 	let insertAt = end;
-	while (insertAt > idx + 1 && lines[insertAt - 1].trim() === "") insertAt--;
+	while (insertAt > idx + 1 && (lines[insertAt - 1] ?? "").trim() === "") insertAt--;
 	lines.splice(insertAt, 0, line);
 	return lines.join("\n");
 }

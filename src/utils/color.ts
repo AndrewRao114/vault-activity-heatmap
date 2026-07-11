@@ -23,7 +23,9 @@ export function parseColorInput(input: string): string | null {
 	const hexMatch =
 		s.match(/^#([0-9a-f]{6}|[0-9a-f]{3})$/i) ?? s.match(/^([0-9a-f]{6})$/i);
 	if (hexMatch) {
-		let h = hexMatch[1].toLowerCase();
+		const match = hexMatch[1];
+		if (!match) return null;
+		let h = match.toLowerCase();
 		if (h.length === 3) h = h.split("").map((c) => c + c).join("");
 		return "#" + h;
 	}
@@ -40,7 +42,7 @@ export function parseColorInput(input: string): string | null {
 /** Background color for an intensity level 1-4 derived from the base color. */
 export function levelColor(baseColor: string, level: number): string {
 	const [r, g, b] = hexToRgb(baseColor);
-	const alpha = [0.3, 0.55, 0.8, 1][Math.max(0, Math.min(3, level - 1))];
+	const alpha = [0.3, 0.55, 0.8, 1][Math.max(0, Math.min(3, level - 1))] ?? 1;
 	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 

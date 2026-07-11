@@ -1,11 +1,20 @@
-import { Notice, Plugin, TAbstractFile, TFile, normalizePath } from "obsidian";
+import {
+	Notice,
+	Platform,
+	Plugin,
+	TAbstractFile,
+	TFile,
+	normalizePath,
+} from "obsidian";
 
 import { DEFAULT_SETTINGS, VIEW_TYPE_HEATMAP } from "./defaults";
 import { ActivityService } from "./services/activity";
 import { AiSummaryService } from "./services/ai-summary";
 import { DailyNotesService } from "./services/daily-notes";
 import { NotificationService } from "./services/notifications";
-import type { ActivityData, DailyTask, HeatmapSettings, PersistedData } from "./types";
+import { SyncService } from "./services/sync";
+import { VaultSyncTransport } from "./services/sync-transport";
+import type { ActivityData, DailyTask, HeatmapSettings } from "./types";
 import { startOfToday, toDateKey, weekStartOf } from "./utils/date";
 import { AddTaskModal } from "./ui/add-task-modal";
 import { HeatmapView } from "./ui/heatmap-view";
@@ -16,14 +25,16 @@ export { VIEW_TYPE_HEATMAP };
 export default class VaultActivityHeatmapPlugin extends Plugin {
 	settings: HeatmapSettings = { ...DEFAULT_SETTINGS };
 	activity: ActivityData = { days: {} };
+	selectedDay = toDateKey(new Date());
 
+	sync = new SyncService(this, new VaultSyncTransport(this));
 	activityService = new ActivityService(this);
 	dailyNotes = new DailyNotesService(this);
 	aiSummary = new AiSummaryService(this);
 	notifications = new NotificationService(this);
 
 	async onload() {
-		await this.loadPersisted();
+		await this.sync.start();
 
 		this.registerView(VIEW_TYPE_HEATMAP, (leaf) => new HeatmapView(leaf, this));
 
@@ -85,44 +96,97 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 		});
 
 		this.addSettingTab(new HeatmapSettingTab(this.app, this));
+		this.registerDomEvent(activeDocument, "visibilitychange", () => {
+			if (activeDocument.visibilityState === "hidden") void this.sync.flush();
+			else void this.sync.refreshFromDisk();
+		});
 
-		// Vault emits `create` for every existing file during startup, so only
-		// listen once the initial layout is ready.
+		// Track local editor input instead of vault modify events. Synced remote
+		// file writes can emit modify events and must not be counted as local work.
 		this.app.workspace.onLayoutReady(() => {
 			this.activityService.primeLastSizes();
 			this.registerEvent(
-				this.app.vault.on("create", (f) => this.recordActivity(f, true))
-			);
-			this.registerEvent(
-				this.app.vault.on("modify", (f) => this.recordActivity(f))
+				this.app.workspace.on("editor-change", (editor, info) => {
+					if (info.file) this.activityService.recordEditorChange(info.file, editor.getValue());
+				})
 			);
 			this.registerEvent(
 				this.app.vault.on("rename", (f, oldPath) => this.migratePath(f, oldPath))
 			);
 
 			// Auto weekly/monthly summaries: check shortly after startup, then hourly.
-			window.setTimeout(() => this.maybeAutoSummarize(), 30_000);
+			window.setTimeout(() => void this.maybeAutoSummarize(), 30_000);
 			this.registerInterval(
-				window.setInterval(() => this.maybeAutoSummarize(), 60 * 60 * 1000)
+				window.setInterval(() => void this.maybeAutoSummarize(), 60 * 60 * 1000)
 			);
 		});
 	}
 
 	onunload() {
-		void this.persist();
+		this.activityService.stop();
+		void this.sync.stop();
 	}
 
-	private async loadPersisted() {
-		const raw = (await this.loadData()) as Partial<PersistedData> | null;
-		if (raw?.settings) this.settings = { ...DEFAULT_SETTINGS, ...raw.settings };
-		if (raw?.activity?.days) this.activity = { days: raw.activity.days };
+	onExternalSettingsChange() {
+		return this.sync.refreshFromDisk();
 	}
 
 	async persist() {
-		await this.saveData({
-			settings: this.settings,
-			activity: this.activity,
-		} satisfies PersistedData);
+		await this.sync.flush();
+	}
+
+	saveSettings() {
+		this.sync.updateSharedSettings(this.settings);
+	}
+
+	setLocalFolderFilter(folder: string) {
+		this.sync.updateLocalSettings({ lastFolderFilter: folder });
+	}
+
+	setLocalNotificationEnabled(enabled: boolean) {
+		this.sync.updateLocalSettings({ notifyDesktop: enabled });
+	}
+
+	setDeviceName(name: string) {
+		this.sync.updateLocalSettings({ deviceName: name.trim() || "Obsidian device" });
+	}
+
+	setAiSecretId(id: string) {
+		this.sync.updateLocalSettings({
+			aiSecretId: /^[a-z0-9-]+$/.test(id) ? id : DEFAULT_SETTINGS.aiSecretId,
+		});
+	}
+
+	setNotificationSecretId(id: string) {
+		this.sync.updateLocalSettings({
+			notifySecretId: /^[a-z0-9-]+$/.test(id)
+				? id
+				: DEFAULT_SETTINGS.notifySecretId,
+		});
+	}
+
+	setSelectedDay(dateKey: string) {
+		this.sync.setSelectedDay(dateKey);
+	}
+
+	setAutomationDevice(deviceId: string) {
+		this.sync.setAutomationDevice(deviceId);
+	}
+
+	isAutomationDevice(): boolean {
+		return this.sync.automationDeviceId === this.sync.deviceId;
+	}
+
+	getAiApiKey(): string {
+		const id = this.settings.aiSecretId.trim();
+		if (!/^[a-z0-9-]+$/.test(id)) return "";
+		return this.app.secretStorage.getSecret(id) ?? "";
+	}
+
+	getNotificationWebhook(): string {
+		const id = this.settings.notifySecretId.trim();
+		if (!/^[a-z0-9-]+$/.test(id)) return "";
+		return this.app.secretStorage.getSecret(id) ?? "";
 	}
 
 	recordActivity(file: TAbstractFile, isCreate = false) {
@@ -167,8 +231,8 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 		return weekStartOf(date, this.settings.firstDayOfWeek);
 	}
 
-	maybeAutoSummarize() {
-		this.aiSummary.maybeAutoSummarize();
+	async maybeAutoSummarize() {
+		await this.aiSummary.maybeAutoSummarize();
 	}
 
 	async summarizePeriod(
@@ -192,13 +256,18 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 
 	async activateView() {
 		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_HEATMAP);
-		if (existing.length > 0) {
-			await this.app.workspace.revealLeaf(existing[0]);
+		const existingLeaf = Platform.isPhone
+			? existing.find((leaf) => leaf.getRoot() === this.app.workspace.rootSplit)
+			: existing[0];
+		if (existingLeaf) {
+			await this.app.workspace.revealLeaf(existingLeaf);
 			return;
 		}
-		const leaf = this.app.workspace.getRightLeaf(false);
+		const leaf = Platform.isPhone
+			? this.app.workspace.getLeaf("tab")
+			: this.app.workspace.getRightLeaf(false);
 		if (!leaf) {
-			new Notice("Heatmap: could not open the right sidebar.");
+			new Notice("Heatmap: could not open the activity view.");
 			return;
 		}
 		await leaf.setViewState({ type: VIEW_TYPE_HEATMAP, active: true });

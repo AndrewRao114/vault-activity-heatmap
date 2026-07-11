@@ -6,8 +6,10 @@
 		"module": "ESNext",
 		"target": "ES2020",
 		"allowJs": true,
-		"noImplicitAny": true,
-		"strictNullChecks": true,
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
 		"moduleResolution": "node",
 		"importHelpers": false,
 		"isolatedModules": true,
@@ -15,5 +17,5 @@
 		"skipLibCheck": true,
 		"lib": ["DOM", "ES2020"]
 	},
-	"include": ["src/**/*.ts"]
+	"include": ["src/**/*.ts", "tests/**/*.ts"]
 }

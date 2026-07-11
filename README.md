@@ -25,6 +25,7 @@ planned, and what still needs attention.
 - [Features](#features)
 - [Screenshots](#screenshots)
 - [Quick start](#quick-start)
+- [Mobile and sync](#mobile-and-sync)
 - [Settings](#settings)
 - [Privacy and risk](#privacy-and-risk)
 - [Installation](#installation)
@@ -45,6 +46,7 @@ planned, and what still needs attention.
 | AI summaries | Optional weekly/monthly summaries using your own Anthropic or OpenAI-compatible API key. |
 | Notifications | Optional desktop notifications and phone/webhook pings through ntfy or compatible endpoints. |
 | Panel themes | Customize only this plugin panel with RGB colors, image backdrops, and looping MP4/WebM video backdrops. |
+| Cross-device dashboard | Merge activity from desktop, iOS, and Android through your existing vault sync provider. |
 
 ## Screenshots
 
@@ -64,9 +66,33 @@ planned, and what still needs attention.
 
 1. Open the heatmap from the ribbon calendar icon, or run `Open activity heatmap`.
 2. Click a day square to inspect notes, tasks, and edit sessions.
-3. Right-click a day square to add a task to that day's reflection note.
+3. Right-click a day square, or long-press it on mobile, to add a reflection task.
 4. Run `Backfill history from existing file dates` if you want existing notes to appear immediately.
 5. Optional: configure AI summaries and notifications in the plugin settings.
+
+## Mobile and sync
+
+> Mobile synchronization is in beta for `1.4.0-beta.1`. Back up the vault and
+> upgrade every connected device together before testing.
+
+| Platform | Interface | Support |
+| --- | --- | --- |
+| Windows, macOS, Linux | Sidebar panel | Supported |
+| iPhone and Android phone | Full-width view with day-detail sheet | Supported |
+| iPad and Android tablet | Resizable panel | Supported |
+
+The plugin does not operate a sync server. Its conflict-safe dashboard state is
+carried by the same provider that synchronizes your vault. Obsidian Sync is the
+recommended option for Windows/macOS/iOS/Android combinations. Enable active and
+installed community plugin synchronization on every device.
+
+Local changes are queued within 750 ms and forced to disk within 3 seconds. The
+open dashboard refreshes as soon as Obsidian reports an external settings
+change. Network delivery time remains provider-dependent, and mobile operating
+systems may defer delivery while Obsidian is backgrounded.
+
+See [Mobile and cross-device synchronization](docs/mobile-sync.md) for setup,
+limitations, and troubleshooting.
 
 ## Settings
 
@@ -97,8 +123,9 @@ The plugin gathers edited-note excerpts and activity stats, then writes weekly
 or monthly summaries into your vault. It does not upload your whole vault; it
 only sends the context needed for the requested summary.
 
-Important: API keys are stored in this plugin's `data.json` inside your vault.
-Do not share that file.
+API keys and webhook URLs use Obsidian's secure, device-local SecretStorage.
+Select or create the required secret independently on each device. Neither the
+secret value nor that device's selected secret identifier is synchronized.
 
 ### Panel themes
 
@@ -119,12 +146,13 @@ only happens when you enable features that need it.
 
 | Area | Behavior |
 | --- | --- |
-| Local storage | Activity metadata is stored in `.obsidian/plugins/vault-activity-heatmap/data.json`. |
+| Local storage | Mergeable metadata is stored in plugin `data.json`; device preferences and that device's recovery shard stay in vault-scoped local storage. |
 | Vault enumeration | The plugin can enumerate vault files for heatmap counts, folder filters, and backfill. |
 | Vault reads | The plugin reads note content only for daily task parsing and optional AI summary excerpts. |
 | Vault writes | The plugin writes daily reflection tasks and generated summary notes through Obsidian's vault APIs. |
-| Network requests | No network calls are made for normal heatmap tracking. AI summaries and webhook/phone notifications are opt-in. |
-| API keys | API keys are stored locally in plugin data. Do not share your vault's plugin data file. |
+| Network requests | Normal heatmap tracking is local. Remote backdrop URLs, AI summaries, and webhook/phone notifications are opt-in network features. |
+| API keys | API keys, webhook URLs, and each device's secret selections use device-local Obsidian storage and are omitted from `data.json`. |
+| Synced metadata | If plugin configuration sync is enabled, the provider receives note paths, timestamps, counts, sessions, and device identifiers. |
 | Release provenance | Release assets are built by GitHub Actions and include artifact attestations. |
 
 Ways to keep your risk lower:
@@ -133,7 +161,7 @@ Ways to keep your risk lower:
 - Use a limited API key for AI summaries instead of a personal all-purpose key.
 - Keep webhook/ntfy notification URLs private.
 - Exclude private folders that should not appear in activity stats.
-- Review `.obsidian/plugins/vault-activity-heatmap/data.json` before sharing your vault.
+- Review `.obsidian/plugins/vault-activity-heatmap/data.json` before sharing your vault; it contains activity metadata but not API secrets.
 - Install only from the official release assets: `manifest.json`, `main.js`, and `styles.css`.
 
 ## Installation
@@ -163,6 +191,7 @@ Ways to keep your risk lower:
 ```bash
 npm install
 npm run dev
+npm run test
 npm run build
 npm run typecheck
 ```
@@ -177,8 +206,8 @@ Release assets are the three compiled plugin files:
 
 - Additional summary providers
 - Optional summary templates
-- Better mobile-specific layout tuning
-- More compact mobile layouts for the heatmap panel
+- Optional encrypted dashboard relay research after provider-latency testing
+- Native widgets or quick capture only if they justify a future companion app
 
 ## License
 
