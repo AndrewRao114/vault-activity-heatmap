@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.4.0-beta.1
+
+- Add conflict-safe cross-device dashboard synchronization through the user's
+  existing vault provider.
+- Add versioned per-device activity shards, deterministic merges, clear-history
+  epochs, file/folder rename aliases, and a device-local shard recovery copy.
+- Count debounced local editor changes and local task actions instead of
+  provider-delivered vault writes.
+- Add hot reload through `onExternalSettingsChange()` and serialized
+  read-merge-write persistence.
+- Add a full-width phone view, larger touch grid, bottom-sheet day details,
+  long-press actions, keyboard navigation, and iOS safe-area support.
+- Move AI keys, notification webhooks, and their selections to device-local
+  Obsidian storage.
+- Assign automatic summaries to one selected device to prevent duplicate API
+  requests.
+- Add mobile/sync architecture, data format, troubleshooting, and physical-device
+  testing documentation.
+- Add automated migration and merge-invariant tests.
+
 ## 1.3.4
 
 - Resolve remaining Obsidian community review source-code warnings.

@@ -40,10 +40,12 @@ export class DailyNotesService {
 	}
 
 	/** Get the reflection note for a date, creating folder + note if needed. */
-	private async getOrCreateDailyNote(dateKey: string): Promise<TFile | null> {
+	private async getOrCreateDailyNote(
+		dateKey: string
+	): Promise<{ file: TFile; created: boolean } | null> {
 		const path = this.dailyNotePath(dateKey);
 		const existing = this.plugin.app.vault.getAbstractFileByPath(path);
-		if (existing instanceof TFile) return existing;
+		if (existing instanceof TFile) return { file: existing, created: false };
 		if (existing) {
 			new Notice(`Heatmap: "${path}" exists but is not a note.`);
 			return null;
@@ -52,7 +54,11 @@ export class DailyNotesService {
 		await this.ensureFolder(dir);
 		const heading = this.headingLine();
 		try {
-			return await this.plugin.app.vault.create(path, heading ? heading + "\n" : "");
+			const file = await this.plugin.app.vault.create(
+				path,
+				heading ? heading + "\n" : ""
+			);
+			return { file, created: true };
 		} catch (e) {
 			new Notice(`Heatmap: could not create "${path}".`);
 			console.error("vault-activity-heatmap: create failed", e);
@@ -61,18 +67,26 @@ export class DailyNotesService {
 	}
 
 	async addTaskToDailyReflection(dateKey: string, taskText: string) {
-		const file = await this.getOrCreateDailyNote(dateKey);
-		if (!file) return;
+		const result = await this.getOrCreateDailyNote(dateKey);
+		if (!result) return;
+		const { file, created } = result;
 		const taskLine = `- [ ] ${taskText}`;
-		await this.plugin.app.vault.process(file, (content) =>
+		this.plugin.activityService.beginLocalMutation(file);
+		const content = await this.plugin.app.vault.process(file, (content) =>
 			insertUnderHeading(content, this.plugin.settings.taskHeading, taskLine)
 		);
+		this.plugin.activityService.recordLocalMutation(file, created, content);
 		new Notice(`Task added to ${file.path}`);
 	}
 
 	async openDailyReflection(dateKey: string) {
-		const file = await this.getOrCreateDailyNote(dateKey);
-		if (!file) return;
+		const result = await this.getOrCreateDailyNote(dateKey);
+		if (!result) return;
+		const { file, created } = result;
+		if (created) {
+			const content = await this.plugin.app.vault.cachedRead(file);
+			this.plugin.activityService.recordLocalMutation(file, true, content);
+		}
 		await this.plugin.app.workspace.getLeaf(false).openFile(file);
 	}
 
@@ -89,9 +103,13 @@ export class DailyNotesService {
 		const tasks: DailyTask[] = [];
 		for (let i = 0; i < lines.length; i++) {
 			if (skip[i]) continue;
-			const m = lines[i].match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
-			if (m) {
-				tasks.push({ line: i, raw: lines[i], text: m[2], done: m[1] !== " " });
+			const line = lines[i];
+			if (line === undefined) continue;
+			const m = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
+			const marker = m?.[1];
+			const text = m?.[2];
+			if (marker !== undefined && text !== undefined) {
+				tasks.push({ line: i, raw: line, text, done: marker !== " " });
 			}
 		}
 		return { file: af, tasks };
@@ -99,14 +117,21 @@ export class DailyNotesService {
 
 	/** Check or uncheck a task line in a reflection note. */
 	async toggleTask(file: TFile, task: DailyTask, done: boolean) {
-		await this.plugin.app.vault.process(file, (content) => {
+		let changed = false;
+		this.plugin.activityService.beginLocalMutation(file);
+		const content = await this.plugin.app.vault.process(file, (content) => {
 			const lines = content.split("\n");
 			const i = lines[task.line] === task.raw ? task.line : lines.indexOf(task.raw);
 			if (i === -1) return content; // task edited away meanwhile
-			lines[i] = done
-				? lines[i].replace(/^(\s*[-*]\s+)\[ \]/, "$1[x]")
-				: lines[i].replace(/^(\s*[-*]\s+)\[[xX]\]/, "$1[ ]");
+			const line = lines[i];
+			if (line === undefined) return content;
+			const next = done
+				? line.replace(/^(\s*[-*]\s+)\[ \]/, "$1[x]")
+				: line.replace(/^(\s*[-*]\s+)\[[xX]\]/, "$1[ ]");
+			changed = next !== line;
+			lines[i] = next;
 			return lines.join("\n");
 		});
+		if (changed) this.plugin.activityService.recordLocalMutation(file, false, content);
 	}
 }

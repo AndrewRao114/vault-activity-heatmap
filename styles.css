@@ -140,6 +140,20 @@
 	cursor: pointer;
 }
 
+button.vah-cell {
+	min-width: 11px;
+	min-height: 11px;
+	padding: 0;
+	border: 0;
+	box-shadow: none;
+	touch-action: manipulation;
+}
+
+button.vah-cell:hover,
+button.vah-cell:focus-visible {
+	box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 3px var(--text-accent);
+}
+
 .vah-cell.vah-future {
 	opacity: 0.35;
 	cursor: default;
@@ -148,6 +162,11 @@
 .vah-cell.vah-today {
 	outline: 1.5px solid var(--text-accent);
 	outline-offset: 0.5px;
+}
+
+.vah-cell.vah-selected {
+	outline: 2px solid var(--text-accent);
+	outline-offset: 1px;
 }
 
 /* legend */
@@ -176,6 +195,24 @@
 	margin: 4px 0 8px 0;
 }
 
+.vah-detail-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.vah-detail-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.vah-detail-actions button {
+	width: 36px;
+	height: 36px;
+}
+
 .vah-detail-empty {
 	font-size: 0.85em;
 	color: var(--text-muted);
@@ -201,6 +238,19 @@
 	align-items: baseline;
 	min-width: 0;
 	color: var(--text-muted);
+}
+
+button.vah-detail-link,
+button.vah-tl-title {
+	width: auto;
+	height: auto;
+	min-width: 0;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	font: inherit;
+	text-align: left;
 }
 
 /* folder prefix truncates from its right; the file name never clips */
@@ -324,6 +374,9 @@ input.vah-task-input:focus {
 	cursor: pointer;
 	color: transparent;
 	box-sizing: border-box;
+	padding: 0;
+	box-shadow: none;
+	min-width: 16px;
 }
 
 .vah-task-circle:hover {
@@ -363,6 +416,11 @@ input.vah-task-input:focus {
 	color: var(--text-muted);
 	cursor: pointer;
 	margin: 8px 0 4px;
+	padding: 2px 0;
+	height: auto;
+	background: transparent;
+	box-shadow: none;
+	text-align: left;
 }
 
 /* edit timeline */
@@ -405,4 +463,174 @@ input.vah-task-input:focus {
 	width: 130px;
 	font-family: var(--font-monospace);
 	font-size: 0.85em;
+}
+
+/* phone workspace view */
+.vah-container.vah-phone {
+	padding: max(8px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+		max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+	overflow: visible;
+	border-radius: 0;
+}
+
+.vah-phone .vah-stats {
+	gap: 22px;
+	margin-top: 8px;
+}
+
+.vah-phone .vah-controls select {
+	width: 100%;
+	height: 44px;
+}
+
+.vah-phone .vah-scroll {
+	overscroll-behavior-x: contain;
+	scrollbar-width: thin;
+	padding: 4px 0 8px;
+}
+
+.vah-phone .vah-months {
+	margin-left: 34px;
+	height: 18px;
+}
+
+.vah-phone .vah-month-slot {
+	flex-basis: 24px;
+}
+
+.vah-phone .vah-weekdays {
+	gap: 0;
+	width: 34px;
+	flex-basis: 34px;
+}
+
+.vah-phone .vah-weekday {
+	height: 24px;
+	line-height: 24px;
+}
+
+.vah-phone .vah-grid,
+.vah-phone .vah-week {
+	gap: 0;
+}
+
+.vah-phone .vah-legend .vah-cell {
+	width: 18px;
+	height: 18px;
+	flex-basis: 18px;
+	border-radius: 4px;
+}
+
+.vah-phone .vah-grid button.vah-cell {
+	box-sizing: border-box;
+	width: 24px;
+	height: 24px;
+	min-width: 24px;
+	min-height: 24px;
+	flex-basis: 24px;
+	padding: 3px;
+	border-radius: 6px;
+	background-clip: content-box;
+}
+
+.vah-sheet-scrim {
+	position: fixed;
+	inset: 0;
+	z-index: 998;
+	background: rgba(0, 0, 0, 0.42);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 160ms ease;
+}
+
+.vah-sheet-scrim.is-open {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+.vah-detail.vah-detail-sheet {
+	position: fixed;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	z-index: 999;
+	max-height: min(76vh, 720px);
+	max-height: min(76dvh, 720px);
+	overflow-y: auto;
+	margin: 0;
+	padding: 14px max(16px, env(safe-area-inset-right))
+		max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+	border-top: 1px solid var(--background-modifier-border);
+	border-radius: 8px 8px 0 0;
+	background: var(--background-primary);
+	box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.28);
+	transform: translateY(105%);
+	transition: transform 180ms ease, visibility 0s linear 180ms;
+	visibility: hidden;
+	pointer-events: none;
+}
+
+.vah-detail.vah-detail-sheet.is-open {
+	transform: translateY(0);
+	visibility: visible;
+	pointer-events: auto;
+	transition-delay: 0s;
+}
+
+.vah-phone .vah-task-row,
+.vah-phone .vah-task-add {
+	min-height: 44px;
+}
+
+.vah-phone .vah-task-circle {
+	width: 24px;
+	height: 24px;
+	min-width: 24px;
+	flex-basis: 24px;
+}
+
+@media (max-width: 600px) {
+	.vah-settings {
+		padding-bottom: max(24px, env(safe-area-inset-bottom));
+	}
+
+	.vah-settings .setting-item {
+		align-items: stretch;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.vah-settings .setting-item-control {
+		flex-wrap: wrap;
+		justify-content: flex-start;
+		min-width: 0;
+		width: 100%;
+	}
+
+	.vah-settings .setting-item-info {
+		width: 100%;
+	}
+
+	.vah-settings input[type="text"],
+	.vah-settings textarea,
+	.vah-settings select,
+	.vah-settings .dropdown {
+		max-width: none;
+		width: 100%;
+	}
+
+	.vah-rgb-input {
+		width: min(100%, 240px);
+	}
+
+	.vah-settings input[type="range"] {
+		width: min(100%, 280px);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.vah-sheet-scrim,
+	.vah-detail.vah-detail-sheet {
+		transition: none;
+	}
 }

@@ -1,11 +1,12 @@
 {
 	"name": "vault-activity-heatmap",
-	"version": "1.3.4",
+	"version": "1.4.0-beta.1",
 	"description": "GitHub-style contribution heatmap of daily note-taking activity for Obsidian",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "node esbuild.config.mjs production",
+		"test": "vitest run",
 		"typecheck": "tsc --noEmit"
 	},
 	"keywords": [
@@ -20,7 +21,8 @@
 	"devDependencies": {
 		"@types/node": "^20.14.0",
 		"esbuild": "^0.28.1",
-		"obsidian": "^1.5.7",
-		"typescript": "^5.4.5"
+		"obsidian": "^1.13.1",
+		"typescript": "^5.4.5",
+		"vitest": "^4.1.10"
 	}
 }

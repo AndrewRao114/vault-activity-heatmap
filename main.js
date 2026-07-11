@@ -1,3 +1,4 @@
+"use strict";
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -23,10 +24,14 @@ __export(main_exports, {
   default: () => VaultActivityHeatmapPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian10 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 
 // src/defaults.ts
 var VIEW_TYPE_HEATMAP = "vault-activity-heatmap";
+var LOCAL_STATE_KEY = "vault-activity-heatmap-device-v1";
+var LOCAL_SHARD_KEY_PREFIX = "vault-activity-heatmap-shard-v2:";
+var DEFAULT_AI_SECRET_ID = "vault-activity-heatmap-ai-api-key";
+var DEFAULT_NOTIFY_SECRET_ID = "vault-activity-heatmap-notification-webhook";
 var DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 var MONTH_NAMES = [
   "Jan",
@@ -64,7 +69,7 @@ var DEFAULT_SETTINGS = {
   panelTextColor: "",
   panelBgColor: "",
   aiProvider: "anthropic",
-  aiApiKey: "",
+  aiSecretId: DEFAULT_AI_SECRET_ID,
   aiModel: "",
   aiBaseUrl: "",
   aiSummaryFolder: "AI summaries",
@@ -73,7 +78,7 @@ var DEFAULT_SETTINGS = {
   aiLastWeekly: "",
   aiLastMonthly: "",
   notifyDesktop: true,
-  notifyWebhook: ""
+  notifySecretId: DEFAULT_NOTIFY_SECRET_ID
 };
 
 // src/services/activity.ts
@@ -133,18 +138,81 @@ function notePathLabels(paths, mode) {
 }
 
 // src/services/activity.ts
+var EDIT_IDLE_MS = 1200;
+var EDIT_MAX_MS = 5e3;
 var ActivityService = class {
   constructor(plugin) {
     this.plugin = plugin;
     /** Last known file sizes, for timeline byte deltas. */
     this.lastSizes = /* @__PURE__ */ new Map();
-    this.requestSave = (0, import_obsidian2.debounce)(() => void this.plugin.persist(), 3e3, true);
+    this.pendingEditorChanges = /* @__PURE__ */ new Map();
+    this.suppressEditorUntil = /* @__PURE__ */ new Map();
     this.refreshViews = (0, import_obsidian2.debounce)(() => this.plugin.renderAllViews(), 600, true);
   }
   primeLastSizes() {
     for (const f of this.plugin.app.vault.getMarkdownFiles()) {
       this.lastSizes.set(f.path, f.stat.size);
     }
+  }
+  recordEditorChange(file, text) {
+    if (!this.isTracked(file)) return;
+    const textSize = new TextEncoder().encode(text).byteLength;
+    if ((this.suppressEditorUntil.get(file.path) ?? 0) > Date.now()) {
+      this.lastSizes.set(file.path, textSize);
+      return;
+    }
+    this.suppressEditorUntil.delete(file.path);
+    const now = Date.now();
+    const existing = this.pendingEditorChanges.get(file.path);
+    if (existing) {
+      window.clearTimeout(existing.timer);
+      existing.file = file;
+      existing.text = text;
+      if (now - existing.startedAt >= EDIT_MAX_MS) {
+        this.flushEditorChange(file.path);
+        return;
+      }
+      existing.timer = window.setTimeout(
+        () => this.flushEditorChange(file.path),
+        EDIT_IDLE_MS
+      );
+      return;
+    }
+    this.pendingEditorChanges.set(file.path, {
+      file,
+      text,
+      startedAt: now,
+      timer: window.setTimeout(() => this.flushEditorChange(file.path), EDIT_IDLE_MS)
+    });
+  }
+  beginLocalMutation(file) {
+    if (this.pendingEditorChanges.has(file.path)) {
+      this.flushEditorChange(file.path);
+    }
+    this.suppressEditorUntil.set(file.path, Date.now() + 750);
+  }
+  recordLocalMutation(file, isCreate, content) {
+    this.beginLocalMutation(file);
+    this.recordActivity(
+      file,
+      isCreate,
+      new TextEncoder().encode(content).byteLength
+    );
+  }
+  flushEditorChange(path) {
+    const pending = this.pendingEditorChanges.get(path);
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    this.pendingEditorChanges.delete(path);
+    const isCreate = !this.lastSizes.has(path) && Date.now() - pending.file.stat.ctime < 3e4;
+    const size = new TextEncoder().encode(pending.text).byteLength;
+    this.recordActivity(pending.file, isCreate, size);
+  }
+  stop() {
+    for (const path of [...this.pendingEditorChanges.keys()]) {
+      this.flushEditorChange(path);
+    }
+    this.suppressEditorUntil.clear();
   }
   isTracked(file) {
     if (!(file instanceof import_obsidian2.TFile) || file.extension !== "md") return false;
@@ -153,15 +221,15 @@ var ActivityService = class {
     }
     return true;
   }
-  recordActivity(file, isCreate = false) {
-    var _a;
+  recordActivity(file, isCreate = false, sizeOverride) {
     if (!this.isTracked(file)) return;
     const now = Date.now();
     const key = toDateKey(/* @__PURE__ */ new Date());
-    const day = (_a = this.plugin.activity.days)[key] ?? (_a[key] = { edits: 0, files: {} });
+    const days = this.plugin.sync.getLocalShard().days;
+    const day = days[key] ?? (days[key] = { edits: 0, files: {} });
     day.edits += 1;
     day.files[file.path] = (day.files[file.path] ?? 0) + 1;
-    const newSize = file.stat.size;
+    const newSize = sizeOverride ?? file.stat.size;
     const prevSize = this.lastSizes.get(file.path);
     const delta = prevSize === void 0 ? isCreate ? newSize : 0 : newSize - prevSize;
     this.lastSizes.set(file.path, newSize);
@@ -169,8 +237,9 @@ var ActivityService = class {
     const gapMs = Math.max(1, this.plugin.settings.sessionGapMinutes) * 6e4;
     let last;
     for (let i = sessions.length - 1; i >= 0; i--) {
-      if (sessions[i].f === file.path) {
-        last = sessions[i];
+      const session = sessions[i];
+      if (session?.f === file.path) {
+        last = session;
         break;
       }
     }
@@ -187,35 +256,38 @@ var ActivityService = class {
       last.n += 1;
       last.d += delta;
     }
-    this.requestSave();
+    this.plugin.sync.touchActivity();
     this.refreshViews();
   }
   /** Keep history consistent when files are renamed or moved. */
   migratePath(file, oldPath) {
-    if (!(file instanceof import_obsidian2.TFile)) return;
-    let changed = false;
-    for (const day of Object.values(this.plugin.activity.days)) {
-      const count = day.files[oldPath];
-      if (count !== void 0) {
-        day.files[file.path] = (day.files[file.path] ?? 0) + count;
-        delete day.files[oldPath];
-        changed = true;
-      }
-      for (const session of day.sessions ?? []) {
-        if (session.f === oldPath) {
-          session.f = file.path;
-          changed = true;
-        }
-      }
+    if (file instanceof import_obsidian2.TFolder) {
+      this.plugin.sync.setPathAlias(`${oldPath.replace(/\/$/, "")}/`, `${file.path}/`);
+      return;
     }
-    const size = this.lastSizes.get(oldPath);
-    if (size !== void 0) {
-      this.lastSizes.delete(oldPath);
-      this.lastSizes.set(file.path, size);
-    }
-    if (changed) {
-      this.requestSave();
-      this.refreshViews();
+    if (file instanceof import_obsidian2.TFile) {
+      const suppressedUntil = this.suppressEditorUntil.get(oldPath);
+      if (suppressedUntil !== void 0) {
+        this.suppressEditorUntil.delete(oldPath);
+        this.suppressEditorUntil.set(file.path, suppressedUntil);
+      }
+      const pending = this.pendingEditorChanges.get(oldPath);
+      if (pending) {
+        window.clearTimeout(pending.timer);
+        this.pendingEditorChanges.delete(oldPath);
+        pending.file = file;
+        pending.timer = window.setTimeout(
+          () => this.flushEditorChange(file.path),
+          EDIT_IDLE_MS
+        );
+        this.pendingEditorChanges.set(file.path, pending);
+      }
+      const size = this.lastSizes.get(oldPath);
+      if (size !== void 0) {
+        this.lastSizes.delete(oldPath);
+        this.lastSizes.set(file.path, size);
+      }
+      this.plugin.sync.setPathAlias(oldPath, file.path);
     }
   }
   /**
@@ -224,8 +296,8 @@ var ActivityService = class {
    * once on its last-modified day.
    */
   backfillFromFileStats() {
-    var _a;
     const files = this.plugin.app.vault.getMarkdownFiles();
+    const days = this.plugin.sync.getLocalShard().days;
     let added = 0;
     for (const file of files) {
       if (!this.isTracked(file)) continue;
@@ -234,24 +306,23 @@ var ActivityService = class {
         toDateKey(new Date(file.stat.mtime))
       ]);
       for (const key of stamps) {
-        const day = (_a = this.plugin.activity.days)[key] ?? (_a[key] = { edits: 0, files: {} });
-        if (day.files[file.path] === void 0) {
+        const day = days[key] ?? (days[key] = { edits: 0, files: {} });
+        const aggregateDay = this.plugin.activity.days[key];
+        if (day.files[file.path] === void 0 && aggregateDay?.files[file.path] === void 0) {
           day.files[file.path] = 1;
           day.edits += 1;
           added += 1;
         }
       }
     }
-    this.requestSave();
+    if (added > 0) this.plugin.sync.touchActivity();
     this.refreshViews();
     new import_obsidian2.Notice(
       added > 0 ? `Heatmap: backfilled ${added} activity entries from ${files.length} notes.` : "Heatmap: nothing new to backfill."
     );
   }
   clearHistory() {
-    this.plugin.activity = { days: {} };
-    this.requestSave();
-    this.refreshViews();
+    this.plugin.sync.clearActivity();
     new import_obsidian2.Notice("Heatmap history cleared.");
   }
   /** Activity count for one day under an optional folder filter. */
@@ -278,10 +349,10 @@ var ActivityService = class {
   }
   intensityLevel(count) {
     if (count <= 0) return 0;
-    const t = this.plugin.settings.thresholds;
-    if (count >= t[3]) return 4;
-    if (count >= t[2]) return 3;
-    if (count >= t[1]) return 2;
+    const [, level2 = 3, level3 = 6, level4 = 10] = this.plugin.settings.thresholds;
+    if (count >= level4) return 4;
+    if (count >= level3) return 3;
+    if (count >= level2) return 2;
     return 1;
   }
   allFolderPaths() {
@@ -320,60 +391,66 @@ function parseOpenAiResponse(value) {
   if (!isRecord(first) || !isRecord(first.message)) return "";
   return typeof first.message.content === "string" ? first.message.content : "";
 }
+function versionedApiUrl(baseUrl, path) {
+  const base = baseUrl.replace(/\/+$/, "");
+  return `${base}${/\/v1$/i.test(base) ? "" : "/v1"}/${path}`;
+}
 var AiSummaryService = class {
   constructor(plugin) {
     this.plugin = plugin;
     this.aiRunning = false;
   }
   /** Summarize completed periods that have not been summarized yet. */
-  maybeAutoSummarize() {
-    const s = this.plugin.settings;
-    if (!s.aiApiKey) return;
+  async maybeAutoSummarize() {
+    if (!this.plugin.isAutomationDevice() || !this.plugin.getAiApiKey()) return;
     const today = startOfToday();
-    if (s.aiAutoWeekly) {
-      const thisWeekStart = weekStartOf(today, s.firstDayOfWeek);
+    if (this.plugin.settings.aiAutoWeekly) {
+      const thisWeekStart = weekStartOf(today, this.plugin.settings.firstDayOfWeek);
       const prevStart = new Date(thisWeekStart);
       prevStart.setDate(prevStart.getDate() - 7);
       const prevKey = toDateKey(prevStart);
-      if (s.aiLastWeekly !== prevKey) {
+      if (this.plugin.settings.aiLastWeekly !== prevKey) {
         const prevEnd = new Date(thisWeekStart);
         prevEnd.setDate(prevEnd.getDate() - 1);
-        s.aiLastWeekly = prevKey;
-        void this.plugin.persist();
-        void this.summarizePeriod(
+        const result = await this.summarizePeriod(
           prevKey,
           toDateKey(prevEnd),
           "Weekly",
           `Weekly summary ${prevKey}`
         );
+        if (result === "completed" || result === "no-activity") {
+          this.plugin.settings.aiLastWeekly = prevKey;
+          this.plugin.saveSettings();
+        }
       }
     }
-    if (s.aiAutoMonthly) {
+    if (this.plugin.settings.aiAutoMonthly) {
       const y = today.getFullYear();
       const m = today.getMonth();
       const prevId = m === 0 ? `${y - 1}-12` : `${y}-${String(m).padStart(2, "0")}`;
-      if (s.aiLastMonthly !== prevId) {
+      if (this.plugin.settings.aiLastMonthly !== prevId) {
         const lastDayPrev = new Date(y, m, 0);
-        s.aiLastMonthly = prevId;
-        void this.plugin.persist();
-        void this.summarizePeriod(
+        const result = await this.summarizePeriod(
           `${prevId}-01`,
           toDateKey(lastDayPrev),
           "Monthly",
           `Monthly summary ${prevId}`
         );
+        if (result === "completed" || result === "no-activity") {
+          this.plugin.settings.aiLastMonthly = prevId;
+          this.plugin.saveSettings();
+        }
       }
     }
   }
   async summarizePeriod(startKey, endKey, label, noteName) {
-    const s = this.plugin.settings;
-    if (!s.aiApiKey) {
+    if (!this.plugin.getAiApiKey()) {
       new import_obsidian3.Notice("Heatmap: set an AI API key in the plugin settings first.");
-      return;
+      return "missing-key";
     }
     if (this.aiRunning) {
       new import_obsidian3.Notice("Heatmap: a summary is already being generated.");
-      return;
+      return "busy";
     }
     this.aiRunning = true;
     new import_obsidian3.Notice(`Heatmap: generating ${label.toLowerCase()} summary...`);
@@ -381,7 +458,7 @@ var AiSummaryService = class {
       const material = await this.collectPeriodMaterial(startKey, endKey);
       if (material.fileCount === 0) {
         new import_obsidian3.Notice(`Heatmap: no recorded activity between ${startKey} and ${endKey}.`);
-        return;
+        return "no-activity";
       }
       const prompt = [
         `You are summarizing the writing activity of a personal Obsidian vault for the period ${startKey} to ${endKey}.`,
@@ -404,11 +481,13 @@ var AiSummaryService = class {
         summary.trim().split("\n").slice(0, 4).join(" ").slice(0, 300)
       );
       new import_obsidian3.Notice(`Heatmap: ${label.toLowerCase()} summary saved to ${path}`);
+      return "completed";
     } catch (e) {
       console.error("vault-activity-heatmap: summary failed", e);
       new import_obsidian3.Notice(
         `Heatmap: summary failed - ${e instanceof Error ? e.message : String(e)}`
       );
+      return "failed";
     } finally {
       this.aiRunning = false;
     }
@@ -449,14 +528,15 @@ ${excerpt}`);
   }
   async callModel(prompt) {
     const s = this.plugin.settings;
+    const apiKey = this.plugin.getAiApiKey();
     if (s.aiProvider === "anthropic") {
       const base2 = (s.aiBaseUrl.trim() || "https://api.anthropic.com").replace(/\/+$/, "");
       const res2 = await (0, import_obsidian3.requestUrl)({
-        url: `${base2}/v1/messages`,
+        url: versionedApiUrl(base2, "messages"),
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-api-key": s.aiApiKey,
+          "x-api-key": apiKey,
           "anthropic-version": "2023-06-01"
         },
         body: JSON.stringify({
@@ -475,11 +555,11 @@ ${excerpt}`);
     }
     const base = (s.aiBaseUrl.trim() || "https://api.openai.com").replace(/\/+$/, "");
     const res = await (0, import_obsidian3.requestUrl)({
-      url: `${base}/v1/chat/completions`,
+      url: versionedApiUrl(base, "chat/completions"),
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${s.aiApiKey}`
+        authorization: `Bearer ${apiKey}`
       },
       body: JSON.stringify({
         model: s.aiModel.trim() || "gpt-4o-mini",
@@ -528,10 +608,10 @@ function normalizeHeadingText(text) {
 function nonHeadingLines(lines) {
   const ignored = new Array(lines.length).fill(false);
   let start = 0;
-  if (lines.length > 0 && lines[0].trim() === "---") {
+  if (lines[0]?.trim() === "---") {
     let close = -1;
     for (let j = 1; j < lines.length; j++) {
-      const t = lines[j].trim();
+      const t = lines[j]?.trim() ?? "";
       if (t === "---" || t === "...") {
         close = j;
         break;
@@ -545,16 +625,18 @@ function nonHeadingLines(lines) {
   let fenceChar = "";
   let fenceLen = 0;
   for (let i = start; i < lines.length; i++) {
-    const t = lines[i].trimStart();
+    const t = lines[i]?.trimStart() ?? "";
     if (fenceChar) {
       ignored[i] = true;
       const m = t.match(/^(`{3,}|~{3,})\s*$/);
-      if (m && m[1][0] === fenceChar && m[1].length >= fenceLen) fenceChar = "";
+      const fence = m?.[1];
+      if (fence?.[0] === fenceChar && fence.length >= fenceLen) fenceChar = "";
     } else {
       const m = t.match(/^(`{3,}|~{3,})/);
-      if (m) {
-        fenceChar = m[1][0];
-        fenceLen = m[1].length;
+      const fence = m?.[1];
+      if (fence?.[0]) {
+        fenceChar = fence[0];
+        fenceLen = fence.length;
         ignored[i] = true;
       }
     }
@@ -574,8 +656,9 @@ function insertUnderHeading(content, heading, line) {
   let idx = -1;
   for (let i = 0; i < lines.length; i++) {
     if (skip[i]) continue;
-    const m = lines[i].match(/^#{1,6}\s+(.*)$/);
-    if (m && normalizeHeadingText(m[1]) === headingText) {
+    const m = lines[i]?.match(/^#{1,6}\s+(.*)$/);
+    const text = m?.[1];
+    if (text !== void 0 && normalizeHeadingText(text) === headingText) {
       idx = i;
       break;
     }
@@ -587,13 +670,13 @@ function insertUnderHeading(content, heading, line) {
   let end = lines.length;
   for (let i = idx + 1; i < lines.length; i++) {
     if (skip[i]) continue;
-    if (/^#{1,6}\s/.test(lines[i])) {
+    if (/^#{1,6}\s/.test(lines[i] ?? "")) {
       end = i;
       break;
     }
   }
   let insertAt = end;
-  while (insertAt > idx + 1 && lines[insertAt - 1].trim() === "") insertAt--;
+  while (insertAt > idx + 1 && (lines[insertAt - 1] ?? "").trim() === "") insertAt--;
   lines.splice(insertAt, 0, line);
   return lines.join("\n");
 }
@@ -632,7 +715,7 @@ var DailyNotesService = class {
   async getOrCreateDailyNote(dateKey) {
     const path = this.dailyNotePath(dateKey);
     const existing = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (existing instanceof import_obsidian4.TFile) return existing;
+    if (existing instanceof import_obsidian4.TFile) return { file: existing, created: false };
     if (existing) {
       new import_obsidian4.Notice(`Heatmap: "${path}" exists but is not a note.`);
       return null;
@@ -641,7 +724,11 @@ var DailyNotesService = class {
     await this.ensureFolder(dir);
     const heading = this.headingLine();
     try {
-      return await this.plugin.app.vault.create(path, heading ? heading + "\n" : "");
+      const file = await this.plugin.app.vault.create(
+        path,
+        heading ? heading + "\n" : ""
+      );
+      return { file, created: true };
     } catch (e) {
       new import_obsidian4.Notice(`Heatmap: could not create "${path}".`);
       console.error("vault-activity-heatmap: create failed", e);
@@ -649,18 +736,26 @@ var DailyNotesService = class {
     }
   }
   async addTaskToDailyReflection(dateKey, taskText) {
-    const file = await this.getOrCreateDailyNote(dateKey);
-    if (!file) return;
+    const result = await this.getOrCreateDailyNote(dateKey);
+    if (!result) return;
+    const { file, created } = result;
     const taskLine = `- [ ] ${taskText}`;
-    await this.plugin.app.vault.process(
+    this.plugin.activityService.beginLocalMutation(file);
+    const content = await this.plugin.app.vault.process(
       file,
-      (content) => insertUnderHeading(content, this.plugin.settings.taskHeading, taskLine)
+      (content2) => insertUnderHeading(content2, this.plugin.settings.taskHeading, taskLine)
     );
+    this.plugin.activityService.recordLocalMutation(file, created, content);
     new import_obsidian4.Notice(`Task added to ${file.path}`);
   }
   async openDailyReflection(dateKey) {
-    const file = await this.getOrCreateDailyNote(dateKey);
-    if (!file) return;
+    const result = await this.getOrCreateDailyNote(dateKey);
+    if (!result) return;
+    const { file, created } = result;
+    if (created) {
+      const content = await this.plugin.app.vault.cachedRead(file);
+      this.plugin.activityService.recordLocalMutation(file, true, content);
+    }
     await this.plugin.app.workspace.getLeaf(false).openFile(file);
   }
   /** Parse the checkbox tasks of a day's reflection note. */
@@ -674,22 +769,33 @@ var DailyNotesService = class {
     const tasks = [];
     for (let i = 0; i < lines.length; i++) {
       if (skip[i]) continue;
-      const m = lines[i].match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
-      if (m) {
-        tasks.push({ line: i, raw: lines[i], text: m[2], done: m[1] !== " " });
+      const line = lines[i];
+      if (line === void 0) continue;
+      const m = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
+      const marker = m?.[1];
+      const text = m?.[2];
+      if (marker !== void 0 && text !== void 0) {
+        tasks.push({ line: i, raw: line, text, done: marker !== " " });
       }
     }
     return { file: af, tasks };
   }
   /** Check or uncheck a task line in a reflection note. */
   async toggleTask(file, task, done) {
-    await this.plugin.app.vault.process(file, (content) => {
-      const lines = content.split("\n");
+    let changed = false;
+    this.plugin.activityService.beginLocalMutation(file);
+    const content = await this.plugin.app.vault.process(file, (content2) => {
+      const lines = content2.split("\n");
       const i = lines[task.line] === task.raw ? task.line : lines.indexOf(task.raw);
-      if (i === -1) return content;
-      lines[i] = done ? lines[i].replace(/^(\s*[-*]\s+)\[ \]/, "$1[x]") : lines[i].replace(/^(\s*[-*]\s+)\[[xX]\]/, "$1[ ]");
+      if (i === -1) return content2;
+      const line = lines[i];
+      if (line === void 0) return content2;
+      const next = done ? line.replace(/^(\s*[-*]\s+)\[ \]/, "$1[x]") : line.replace(/^(\s*[-*]\s+)\[[xX]\]/, "$1[ ]");
+      changed = next !== line;
+      lines[i] = next;
       return lines.join("\n");
     });
+    if (changed) this.plugin.activityService.recordLocalMutation(file, false, content);
   }
 };
 
@@ -700,23 +806,33 @@ var NotificationService = class {
     this.plugin = plugin;
   }
   async notifyAll(title, body) {
-    if (this.plugin.settings.notifyDesktop && typeof Notification !== "undefined") {
-      try {
-        new Notification(title, { body: body.slice(0, 180) });
-      } catch (e) {
-        console.error("vault-activity-heatmap: desktop notification failed", e);
+    if (this.plugin.settings.notifyDesktop) {
+      if (import_obsidian5.Platform.isDesktopApp && typeof Notification !== "undefined") {
+        try {
+          new Notification(title, { body: body.slice(0, 180) });
+        } catch (e) {
+          console.error("vault-activity-heatmap: desktop notification failed", e);
+        }
+      } else if (import_obsidian5.Platform.isMobileApp) {
+        new import_obsidian5.Notice(`${title}: ${body.slice(0, 180)}`);
       }
     }
-    const hook = this.plugin.settings.notifyWebhook.trim();
+    const hook = this.plugin.getNotificationWebhook().trim();
     if (hook) {
       try {
-        await (0, import_obsidian5.requestUrl)({
+        if (import_obsidian5.Platform.isMobileApp && !/^https:\/\//i.test(hook)) {
+          throw new Error("mobile webhook URLs must use HTTPS");
+        }
+        const response = await (0, import_obsidian5.requestUrl)({
           url: hook,
           method: "POST",
           body: `${title}
 ${body.slice(0, 800)}`,
           throw: false
         });
+        if (response.status < 200 || response.status >= 300) {
+          throw new Error(`webhook returned HTTP ${response.status}`);
+        }
       } catch (e) {
         console.error("vault-activity-heatmap: webhook notification failed", e);
       }
@@ -724,9 +840,829 @@ ${body.slice(0, 800)}`,
   }
 };
 
-// src/ui/add-task-modal.ts
+// src/services/sync.ts
 var import_obsidian6 = require("obsidian");
-var AddTaskModal = class extends import_obsidian6.Modal {
+
+// src/services/sync-state.ts
+var LEGACY_DEVICE_ID = "legacy-v1";
+var LEGACY_EPOCH = "legacy-epoch";
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function cloneSession(session) {
+  const clone = {
+    f: session.f,
+    s: session.s,
+    e: session.e,
+    n: session.n,
+    d: session.d
+  };
+  if (session.k) clone.k = session.k;
+  if (session.v) clone.v = session.v;
+  return clone;
+}
+function cloneDay(day) {
+  const clone = {
+    edits: day.edits,
+    files: { ...day.files }
+  };
+  if (day.sessions) clone.sessions = day.sessions.map(cloneSession);
+  return clone;
+}
+function cloneActivityShard(shard) {
+  return { ...shard, days: cloneDays(shard.days) };
+}
+function cloneDays(days) {
+  const clone = {};
+  for (const [key, day] of Object.entries(days)) clone[key] = cloneDay(day);
+  return clone;
+}
+function cloneVersioned(value, cloneValue) {
+  return {
+    value: cloneValue(value.value),
+    stamp: { ...value.stamp }
+  };
+}
+function sharedSettingsFrom(settings) {
+  return {
+    baseColor: settings.baseColor,
+    emptyColor: settings.emptyColor,
+    metric: settings.metric,
+    thresholds: [...settings.thresholds],
+    weeksToShow: settings.weeksToShow,
+    excludeFolders: [...settings.excludeFolders],
+    firstDayOfWeek: settings.firstDayOfWeek,
+    reflectionFolder: settings.reflectionFolder,
+    dailyNoteFormat: settings.dailyNoteFormat,
+    taskHeading: settings.taskHeading,
+    sessionGapMinutes: settings.sessionGapMinutes,
+    showTasks: settings.showTasks,
+    showTimeline: settings.showTimeline,
+    notesPathDisplay: settings.notesPathDisplay,
+    backdropPath: settings.backdropPath,
+    backdropDim: settings.backdropDim,
+    backdropBlur: settings.backdropBlur,
+    panelTextColor: settings.panelTextColor,
+    panelBgColor: settings.panelBgColor,
+    aiProvider: settings.aiProvider,
+    aiModel: settings.aiModel,
+    aiBaseUrl: settings.aiBaseUrl,
+    aiSummaryFolder: settings.aiSummaryFolder,
+    aiAutoWeekly: settings.aiAutoWeekly,
+    aiAutoMonthly: settings.aiAutoMonthly,
+    aiLastWeekly: settings.aiLastWeekly,
+    aiLastMonthly: settings.aiLastMonthly
+  };
+}
+function runtimeSettingsFrom(shared, local) {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...shared,
+    thresholds: Array.isArray(shared.thresholds) ? [...shared.thresholds] : [...DEFAULT_SETTINGS.thresholds],
+    excludeFolders: Array.isArray(shared.excludeFolders) ? [...shared.excludeFolders] : [...DEFAULT_SETTINGS.excludeFolders],
+    lastFolderFilter: local.lastFolderFilter,
+    notifyDesktop: local.notifyDesktop,
+    aiSecretId: local.aiSecretId,
+    notifySecretId: local.notifySecretId
+  };
+}
+function stamp(clock, deviceId, updatedAt) {
+  return { clock, deviceId, updatedAt };
+}
+function versioned(value, clock, deviceId, updatedAt) {
+  return { value, stamp: stamp(clock, deviceId, updatedAt) };
+}
+function createInitialState(settings, deviceId, deviceName, selectedDay, now) {
+  const epoch = `epoch-${deviceId}-${now}`;
+  return {
+    schemaVersion: 2,
+    settings: versioned(sharedSettingsFrom(settings), 1, deviceId, now),
+    activityEpoch: versioned(epoch, 1, deviceId, now),
+    activityShards: {
+      [deviceId]: {
+        deviceId,
+        deviceName,
+        epoch,
+        revision: 0,
+        updatedAt: now,
+        days: {}
+      }
+    },
+    pathAliases: {},
+    selectedDay: versioned(selectedDay, 1, deviceId, now),
+    automationDeviceId: versioned("", 1, deviceId, now)
+  };
+}
+function sanitizeSharedSettings(value) {
+  const candidate = isRecord2(value) ? value : {};
+  const stringValue = (key) => typeof candidate[key] === "string" ? candidate[key] : String(DEFAULT_SETTINGS[key]);
+  const numberValue = (key) => typeof candidate[key] === "number" && Number.isFinite(candidate[key]) ? candidate[key] : Number(DEFAULT_SETTINGS[key]);
+  const booleanValue = (key) => typeof candidate[key] === "boolean" ? candidate[key] : Boolean(DEFAULT_SETTINGS[key]);
+  const colorValue = (key) => {
+    const value2 = stringValue(key).trim();
+    if (value2 === "" && key !== "baseColor") return "";
+    return /^#[0-9a-f]{6}$/i.test(value2) ? value2 : DEFAULT_SETTINGS[key];
+  };
+  const rawThresholds = Array.isArray(candidate.thresholds) ? candidate.thresholds.filter(
+    (item) => typeof item === "number" && Number.isFinite(item) && item >= 0
+  ) : [];
+  const thresholds = rawThresholds.length === 4 && rawThresholds.every(
+    (item, index) => index === 0 || item >= (rawThresholds[index - 1] ?? item)
+  ) ? rawThresholds : [...DEFAULT_SETTINGS.thresholds];
+  const runtime = {
+    ...DEFAULT_SETTINGS,
+    baseColor: colorValue("baseColor"),
+    emptyColor: colorValue("emptyColor"),
+    metric: candidate.metric === "edits" ? "edits" : "files",
+    thresholds,
+    weeksToShow: Math.max(4, Math.min(53, Math.round(numberValue("weeksToShow")))),
+    excludeFolders: Array.isArray(candidate.excludeFolders) ? candidate.excludeFolders.filter((item) => typeof item === "string") : [...DEFAULT_SETTINGS.excludeFolders],
+    firstDayOfWeek: numberValue("firstDayOfWeek") === 0 ? 0 : 1,
+    reflectionFolder: stringValue("reflectionFolder"),
+    dailyNoteFormat: stringValue("dailyNoteFormat"),
+    taskHeading: stringValue("taskHeading"),
+    sessionGapMinutes: Math.max(1, numberValue("sessionGapMinutes")),
+    showTasks: booleanValue("showTasks"),
+    showTimeline: booleanValue("showTimeline"),
+    notesPathDisplay: candidate.notesPathDisplay === "full" ? "full" : "name",
+    backdropPath: stringValue("backdropPath"),
+    backdropDim: Math.max(0, Math.min(0.9, numberValue("backdropDim"))),
+    backdropBlur: Math.max(0, Math.min(20, numberValue("backdropBlur"))),
+    panelTextColor: colorValue("panelTextColor"),
+    panelBgColor: colorValue("panelBgColor"),
+    aiProvider: candidate.aiProvider === "openai" ? "openai" : "anthropic",
+    aiModel: stringValue("aiModel"),
+    aiBaseUrl: stringValue("aiBaseUrl"),
+    aiSummaryFolder: stringValue("aiSummaryFolder"),
+    aiAutoWeekly: booleanValue("aiAutoWeekly"),
+    aiAutoMonthly: booleanValue("aiAutoMonthly"),
+    aiLastWeekly: stringValue("aiLastWeekly"),
+    aiLastMonthly: stringValue("aiLastMonthly")
+  };
+  return sharedSettingsFrom(runtime);
+}
+function sanitizeStamp(value, fallbackDeviceId) {
+  if (!isRecord2(value)) return stamp(0, fallbackDeviceId, 0);
+  return {
+    clock: typeof value.clock === "number" && Number.isFinite(value.clock) ? Math.max(0, Math.floor(value.clock)) : 0,
+    deviceId: typeof value.deviceId === "string" ? value.deviceId : fallbackDeviceId,
+    updatedAt: typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt) ? value.updatedAt : 0
+  };
+}
+function sanitizeVersionedString(value, fallback, fallbackDeviceId) {
+  if (!isRecord2(value)) return versioned(fallback, 0, fallbackDeviceId, 0);
+  return {
+    value: typeof value.value === "string" ? value.value : fallback,
+    stamp: sanitizeStamp(value.stamp, fallbackDeviceId)
+  };
+}
+function sanitizeDays(value) {
+  if (!isRecord2(value)) return {};
+  const days = {};
+  for (const [key, rawDay] of Object.entries(value)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key) || !isRecord2(rawDay) || !isRecord2(rawDay.files)) {
+      continue;
+    }
+    const files = {};
+    for (const [path, count] of Object.entries(rawDay.files)) {
+      if (typeof count === "number" && Number.isFinite(count) && count >= 0) {
+        files[path] = count;
+      }
+    }
+    const day = {
+      edits: typeof rawDay.edits === "number" && Number.isFinite(rawDay.edits) && rawDay.edits >= 0 ? rawDay.edits : Object.values(files).reduce((sum, count) => sum + count, 0),
+      files
+    };
+    if (Array.isArray(rawDay.sessions)) {
+      day.sessions = rawDay.sessions.slice(0, 300).filter(isRecord2).filter(
+        (session) => typeof session.f === "string" && typeof session.s === "number" && Number.isFinite(session.s) && typeof session.e === "number" && Number.isFinite(session.e) && typeof session.n === "number" && Number.isFinite(session.n) && session.n >= 1 && typeof session.d === "number" && Number.isFinite(session.d)
+      ).map((session) => {
+        const parsed = {
+          f: session.f,
+          s: session.s,
+          e: session.e,
+          n: session.n,
+          d: session.d
+        };
+        if (session.k === "create") parsed.k = "create";
+        return parsed;
+      });
+    }
+    days[key] = day;
+  }
+  return days;
+}
+function sanitizeActivityShard(value, key, fallbackEpoch) {
+  if (!isRecord2(value)) return null;
+  const deviceId = typeof value.deviceId === "string" ? value.deviceId : key;
+  if (deviceId !== key) return null;
+  return {
+    deviceId,
+    deviceName: typeof value.deviceName === "string" ? value.deviceName : deviceId,
+    epoch: typeof value.epoch === "string" ? value.epoch : fallbackEpoch,
+    revision: typeof value.revision === "number" && Number.isFinite(value.revision) ? Math.max(0, Math.floor(value.revision)) : 0,
+    updatedAt: typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt) ? value.updatedAt : 0,
+    days: sanitizeDays(value.days)
+  };
+}
+function sanitizeV2(raw, fallback) {
+  const rawSettings = isRecord2(raw.settings) ? raw.settings : {};
+  const settings = {
+    value: sanitizeSharedSettings(rawSettings.value),
+    stamp: sanitizeStamp(rawSettings.stamp, fallback.settings.stamp.deviceId)
+  };
+  const epoch = sanitizeVersionedString(
+    raw.activityEpoch,
+    fallback.activityEpoch.value,
+    fallback.activityEpoch.stamp.deviceId
+  );
+  const activityShards = {};
+  if (isRecord2(raw.activityShards)) {
+    for (const [key, value] of Object.entries(raw.activityShards)) {
+      const shard = sanitizeActivityShard(value, key, epoch.value);
+      if (shard) activityShards[key] = shard;
+    }
+  }
+  const pathAliases = {};
+  if (isRecord2(raw.pathAliases)) {
+    for (const [path, value] of Object.entries(raw.pathAliases)) {
+      pathAliases[path] = sanitizeVersionedString(value, "", fallback.settings.stamp.deviceId);
+    }
+  }
+  return {
+    schemaVersion: 2,
+    settings,
+    activityEpoch: epoch,
+    activityShards,
+    pathAliases,
+    selectedDay: sanitizeVersionedString(
+      raw.selectedDay,
+      fallback.selectedDay.value,
+      fallback.selectedDay.stamp.deviceId
+    ),
+    automationDeviceId: sanitizeVersionedString(
+      raw.automationDeviceId,
+      "",
+      fallback.automationDeviceId.stamp.deviceId
+    )
+  };
+}
+function migratePersistedData(raw, deviceId, deviceName, selectedDay, now) {
+  const fallback = createInitialState(DEFAULT_SETTINGS, deviceId, deviceName, selectedDay, now);
+  if (isRecord2(raw) && raw.schemaVersion === 2) {
+    return {
+      state: sanitizeV2(raw, fallback),
+      legacySecrets: { aiApiKey: "", notifyWebhook: "" },
+      legacyLocal: {},
+      migrated: false
+    };
+  }
+  const legacy = isRecord2(raw) ? raw : {};
+  const legacySettings = isRecord2(legacy.settings) ? legacy.settings : {};
+  const {
+    aiApiKey: _legacyAiKey,
+    notifyWebhook: _legacyWebhook,
+    ...legacyWithoutSecrets
+  } = legacySettings;
+  const legacyLocal = {
+    deviceId,
+    deviceName,
+    lastFolderFilter: typeof legacySettings.lastFolderFilter === "string" ? legacySettings.lastFolderFilter : "",
+    notifyDesktop: typeof legacySettings.notifyDesktop === "boolean" ? legacySettings.notifyDesktop : DEFAULT_SETTINGS.notifyDesktop,
+    aiSecretId: DEFAULT_SETTINGS.aiSecretId,
+    notifySecretId: DEFAULT_SETTINGS.notifySecretId
+  };
+  const runtime = runtimeSettingsFrom(
+    sanitizeSharedSettings({
+      ...legacyWithoutSecrets
+    }),
+    legacyLocal
+  );
+  const state = createInitialState(runtime, deviceId, deviceName, selectedDay, now);
+  state.settings = versioned(sharedSettingsFrom(runtime), 1, LEGACY_DEVICE_ID, 0);
+  state.activityEpoch = versioned(LEGACY_EPOCH, 1, LEGACY_DEVICE_ID, 0);
+  state.activityShards = {};
+  const legacyDays = sanitizeDays(legacy.activity?.days);
+  if (Object.keys(legacyDays).length > 0) {
+    state.activityShards[LEGACY_DEVICE_ID] = {
+      deviceId: LEGACY_DEVICE_ID,
+      deviceName: "Imported history",
+      epoch: LEGACY_EPOCH,
+      revision: 1,
+      updatedAt: 0,
+      days: legacyDays
+    };
+  }
+  state.activityShards[deviceId] = {
+    deviceId,
+    deviceName,
+    epoch: LEGACY_EPOCH,
+    revision: 0,
+    updatedAt: now,
+    days: {}
+  };
+  if (runtime.aiAutoWeekly || runtime.aiAutoMonthly) {
+    state.automationDeviceId = versioned(deviceId, 2, deviceId, now);
+  }
+  return {
+    state,
+    legacySecrets: {
+      aiApiKey: typeof legacySettings.aiApiKey === "string" ? legacySettings.aiApiKey : "",
+      notifyWebhook: typeof legacySettings.notifyWebhook === "string" ? legacySettings.notifyWebhook : ""
+    },
+    legacyLocal: {
+      lastFolderFilter: legacyLocal.lastFolderFilter,
+      notifyDesktop: legacyLocal.notifyDesktop,
+      aiSecretId: legacyLocal.aiSecretId,
+      notifySecretId: legacyLocal.notifySecretId
+    },
+    migrated: true
+  };
+}
+function compareStamps(a, b) {
+  if (a.clock !== b.clock) return a.clock - b.clock;
+  return a.deviceId.localeCompare(b.deviceId);
+}
+function chooseVersioned(a, b, cloneValue) {
+  const comparison = compareStamps(a.stamp, b.stamp);
+  if (comparison !== 0) return cloneVersioned(comparison > 0 ? a : b, cloneValue);
+  const left = JSON.stringify(canonicalize(a.value));
+  const right = JSON.stringify(canonicalize(b.value));
+  return cloneVersioned(left.localeCompare(right) >= 0 ? a : b, cloneValue);
+}
+function chooseActivityShard(a, b) {
+  let chosen = a;
+  if (b.revision > a.revision) chosen = b;
+  else if (b.revision === a.revision && JSON.stringify(canonicalize(b)).localeCompare(JSON.stringify(canonicalize(a))) > 0) {
+    chosen = b;
+  }
+  return cloneActivityShard(chosen);
+}
+function mergeStates(a, b) {
+  const activityEpoch = chooseVersioned(a.activityEpoch, b.activityEpoch, String);
+  const activityShards = {};
+  const shardIds = /* @__PURE__ */ new Set([
+    ...Object.keys(a.activityShards),
+    ...Object.keys(b.activityShards)
+  ]);
+  for (const id of [...shardIds].sort()) {
+    const leftCandidate = a.activityShards[id];
+    const rightCandidate = b.activityShards[id];
+    const left = leftCandidate?.epoch === activityEpoch.value ? leftCandidate : void 0;
+    const right = rightCandidate?.epoch === activityEpoch.value ? rightCandidate : void 0;
+    if (left && right) activityShards[id] = chooseActivityShard(left, right);
+    else if (left) activityShards[id] = cloneActivityShard(left);
+    else if (right) activityShards[id] = cloneActivityShard(right);
+  }
+  const pathAliases = {};
+  const aliasPaths = /* @__PURE__ */ new Set([...Object.keys(a.pathAliases), ...Object.keys(b.pathAliases)]);
+  for (const path of [...aliasPaths].sort()) {
+    const left = a.pathAliases[path];
+    const right = b.pathAliases[path];
+    if (left && right) pathAliases[path] = chooseVersioned(left, right, String);
+    else if (left) pathAliases[path] = cloneVersioned(left, String);
+    else if (right) pathAliases[path] = cloneVersioned(right, String);
+  }
+  return {
+    schemaVersion: 2,
+    settings: chooseVersioned(a.settings, b.settings, (settings) => ({
+      ...settings,
+      thresholds: [...settings.thresholds],
+      excludeFolders: [...settings.excludeFolders]
+    })),
+    activityEpoch,
+    activityShards,
+    pathAliases,
+    selectedDay: chooseVersioned(a.selectedDay, b.selectedDay, String),
+    automationDeviceId: chooseVersioned(
+      a.automationDeviceId,
+      b.automationDeviceId,
+      String
+    )
+  };
+}
+function maxLamportClock(state) {
+  let max = Math.max(
+    state.settings.stamp.clock,
+    state.activityEpoch.stamp.clock,
+    state.selectedDay.stamp.clock,
+    state.automationDeviceId.stamp.clock
+  );
+  for (const alias of Object.values(state.pathAliases)) {
+    max = Math.max(max, alias.stamp.clock);
+  }
+  return max;
+}
+function nextVersioned(state, value, deviceId, now) {
+  return versioned(value, maxLamportClock(state) + 1, deviceId, now);
+}
+function resolvePath(path, aliases) {
+  let current = path;
+  const seen = /* @__PURE__ */ new Map();
+  const order = [];
+  for (let i = 0; i < 256; i++) {
+    const cycleStart = seen.get(current);
+    if (cycleStart !== void 0) {
+      return [...order.slice(cycleStart)].sort((a, b) => a.localeCompare(b))[0] ?? current;
+    }
+    seen.set(current, order.length);
+    order.push(current);
+    let next = aliases[current]?.value;
+    if (!next) {
+      const prefix = Object.keys(aliases).filter((candidate) => candidate.endsWith("/") && current.startsWith(candidate)).sort((a, b) => b.length - a.length || a.localeCompare(b))[0];
+      if (prefix) {
+        const alias = aliases[prefix];
+        if (alias) next = alias.value + current.slice(prefix.length);
+      }
+    }
+    if (!next || next === current) return current;
+    current = next;
+  }
+  return [...order, current].sort((a, b) => a.localeCompare(b))[0] ?? current;
+}
+function aggregateActivity(state) {
+  const days = {};
+  for (const shard of Object.values(state.activityShards)) {
+    if (shard.epoch !== state.activityEpoch.value) continue;
+    for (const [key, source] of Object.entries(shard.days)) {
+      const target = days[key] ?? (days[key] = { edits: 0, files: {}, sessions: [] });
+      target.edits += source.edits;
+      for (const [path, count] of Object.entries(source.files)) {
+        const resolved = resolvePath(path, state.pathAliases);
+        target.files[resolved] = (target.files[resolved] ?? 0) + count;
+      }
+      for (const session of source.sessions ?? []) {
+        (target.sessions ?? (target.sessions = [])).push({
+          ...cloneSession(session),
+          f: resolvePath(session.f, state.pathAliases),
+          v: shard.deviceName
+        });
+      }
+    }
+  }
+  for (const day of Object.values(days)) {
+    if (day.sessions?.length === 0) delete day.sessions;
+    else day.sessions?.sort((a, b) => a.s - b.s || a.f.localeCompare(b.f));
+  }
+  return { days };
+}
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!isRecord2(value)) return value;
+  const result = {};
+  for (const key of Object.keys(value).sort()) result[key] = canonicalize(value[key]);
+  return result;
+}
+function stateFingerprint(state) {
+  return JSON.stringify(canonicalize(state));
+}
+
+// src/services/sync.ts
+var IDLE_SAVE_MS = 750;
+var MAX_SAVE_MS = 3e3;
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function createDeviceId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `device-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+function defaultDeviceName() {
+  if (import_obsidian6.Platform.isIosApp) return import_obsidian6.Platform.isTablet ? "iPad" : "iPhone";
+  if (import_obsidian6.Platform.isAndroidApp) return import_obsidian6.Platform.isTablet ? "Android tablet" : "Android phone";
+  if (import_obsidian6.Platform.isWin) return "Windows";
+  if (import_obsidian6.Platform.isMacOS) return "Mac";
+  if (import_obsidian6.Platform.isLinux) return "Linux";
+  return "Obsidian device";
+}
+var SyncService = class {
+  constructor(plugin, transport) {
+    this.plugin = plugin;
+    this.transport = transport;
+    this.idleTimer = null;
+    this.maxTimer = null;
+    this.writeQueue = Promise.resolve();
+    this.started = false;
+    this.stopping = false;
+    this.hasStoredLocalState = false;
+    this.restoredLocalShard = false;
+  }
+  async start() {
+    this.loadLocalState();
+    await this.transport.start((raw) => this.receiveRemote(raw));
+    this.started = true;
+  }
+  loadLocalState() {
+    const stored = this.plugin.app.loadLocalStorage(LOCAL_STATE_KEY);
+    this.hasStoredLocalState = isRecord3(stored);
+    this.local = {
+      deviceId: isRecord3(stored) && typeof stored.deviceId === "string" ? stored.deviceId : createDeviceId(),
+      deviceName: isRecord3(stored) && typeof stored.deviceName === "string" ? stored.deviceName : defaultDeviceName(),
+      lastFolderFilter: isRecord3(stored) && typeof stored.lastFolderFilter === "string" ? stored.lastFolderFilter : "",
+      notifyDesktop: isRecord3(stored) && typeof stored.notifyDesktop === "boolean" ? stored.notifyDesktop : DEFAULT_SETTINGS.notifyDesktop,
+      aiSecretId: isRecord3(stored) && typeof stored.aiSecretId === "string" && /^[a-z0-9-]+$/.test(stored.aiSecretId) ? stored.aiSecretId : DEFAULT_SETTINGS.aiSecretId,
+      notifySecretId: isRecord3(stored) && typeof stored.notifySecretId === "string" && /^[a-z0-9-]+$/.test(stored.notifySecretId) ? stored.notifySecretId : DEFAULT_SETTINGS.notifySecretId
+    };
+    this.saveLocalState();
+  }
+  saveLocalState() {
+    this.plugin.app.saveLocalStorage(LOCAL_STATE_KEY, this.local);
+  }
+  localShardKey() {
+    return `${LOCAL_SHARD_KEY_PREFIX}${this.local.deviceId}`;
+  }
+  restoreLocalShardBackup() {
+    if (this.restoredLocalShard) return false;
+    this.restoredLocalShard = true;
+    const raw = this.plugin.app.loadLocalStorage(this.localShardKey());
+    if (!isRecord3(raw)) return false;
+    const isEnvelope = raw.schemaVersion === 1 && isRecord3(raw.shard);
+    const candidate = migratePersistedData(
+      {
+        ...this.state,
+        activityEpoch: isEnvelope ? raw.activityEpoch : this.state.activityEpoch,
+        activityShards: {
+          [this.local.deviceId]: isEnvelope ? raw.shard : raw
+        }
+      },
+      this.local.deviceId,
+      this.local.deviceName,
+      this.plugin.selectedDay,
+      Date.now()
+    ).state;
+    const before = stateFingerprint(this.state);
+    this.state = mergeStates(this.state, candidate);
+    return stateFingerprint(this.state) !== before;
+  }
+  saveLocalShardBackup() {
+    const shard = this.state?.activityShards[this.local.deviceId];
+    if (!shard) return;
+    try {
+      const backup = {
+        schemaVersion: 1,
+        activityEpoch: {
+          value: this.state.activityEpoch.value,
+          stamp: { ...this.state.activityEpoch.stamp }
+        },
+        shard: cloneActivityShard(shard)
+      };
+      this.plugin.app.saveLocalStorage(this.localShardKey(), backup);
+    } catch (error) {
+      console.error("vault-activity-heatmap: failed to back up local activity shard", error);
+    }
+  }
+  receiveRemote(raw) {
+    this.writeQueue = this.writeQueue.catch(() => void 0).then(() => this.reconcileRemote(raw));
+    return this.writeQueue;
+  }
+  async reconcileRemote(raw) {
+    const migration = migratePersistedData(
+      raw,
+      this.local.deviceId,
+      this.local.deviceName,
+      this.plugin.selectedDay,
+      Date.now()
+    );
+    if (!this.hasStoredLocalState && migration.migrated) {
+      this.local = { ...this.local, ...migration.legacyLocal };
+      this.saveLocalState();
+    }
+    this.migrateSecrets(migration.legacySecrets.aiApiKey, migration.legacySecrets.notifyWebhook);
+    const incoming = migration.state;
+    const merged = this.state ? mergeStates(this.state, incoming) : incoming;
+    const incomingFingerprint = stateFingerprint(incoming);
+    this.state = merged;
+    const changedForRemote = stateFingerprint(merged) !== incomingFingerprint;
+    const restoredShard = this.restoreLocalShardBackup();
+    const createdShard = this.ensureOwnShard();
+    this.saveLocalShardBackup();
+    this.applyRuntimeState();
+    if (migration.migrated || changedForRemote || restoredShard || createdShard) {
+      this.schedulePersist();
+    }
+  }
+  migrateSecrets(aiApiKey, notifyWebhook) {
+    if (aiApiKey && !this.plugin.app.secretStorage.getSecret(DEFAULT_AI_SECRET_ID)) {
+      this.plugin.app.secretStorage.setSecret(DEFAULT_AI_SECRET_ID, aiApiKey);
+    }
+    if (notifyWebhook && !this.plugin.app.secretStorage.getSecret(DEFAULT_NOTIFY_SECRET_ID)) {
+      this.plugin.app.secretStorage.setSecret(DEFAULT_NOTIFY_SECRET_ID, notifyWebhook);
+    }
+  }
+  ensureOwnShard() {
+    const existing = this.state.activityShards[this.local.deviceId];
+    if (existing?.epoch === this.state.activityEpoch.value) {
+      if (existing.deviceName !== this.local.deviceName) {
+        existing.deviceName = this.local.deviceName;
+        existing.revision += 1;
+        existing.updatedAt = Date.now();
+        return true;
+      }
+      return false;
+    }
+    this.state.activityShards[this.local.deviceId] = {
+      deviceId: this.local.deviceId,
+      deviceName: this.local.deviceName,
+      epoch: this.state.activityEpoch.value,
+      revision: (existing?.revision ?? 0) + 1,
+      updatedAt: Date.now(),
+      days: {}
+    };
+    return true;
+  }
+  applyRuntimeState(render = true) {
+    this.plugin.settings = runtimeSettingsFrom(this.state.settings.value, this.local);
+    this.plugin.activity = aggregateActivity(this.state);
+    this.plugin.selectedDay = this.state.selectedDay.value;
+    if (render) this.plugin.renderAllViews();
+  }
+  get deviceId() {
+    return this.local.deviceId;
+  }
+  get deviceName() {
+    return this.local.deviceName;
+  }
+  get automationDeviceId() {
+    return this.state.automationDeviceId.value;
+  }
+  getLocalShard() {
+    this.ensureOwnShard();
+    const shard = this.state.activityShards[this.local.deviceId];
+    if (!shard) throw new Error("Local activity shard invariant failed");
+    return shard;
+  }
+  touchActivity() {
+    const shard = this.getLocalShard();
+    shard.revision += 1;
+    shard.updatedAt = Date.now();
+    this.saveLocalShardBackup();
+    this.applyRuntimeState(false);
+    this.schedulePersist();
+  }
+  updateSharedSettings(settings) {
+    this.state.settings = nextVersioned(
+      this.state,
+      sharedSettingsFrom(settings),
+      this.local.deviceId,
+      Date.now()
+    );
+    this.applyRuntimeState();
+    this.schedulePersist();
+  }
+  updateLocalSettings(patch) {
+    this.local = { ...this.local, ...patch };
+    this.saveLocalState();
+    let shardChanged = false;
+    if (patch.deviceName !== void 0) {
+      shardChanged = this.ensureOwnShard();
+      this.saveLocalShardBackup();
+    }
+    this.applyRuntimeState();
+    if (shardChanged) this.schedulePersist();
+  }
+  setSelectedDay(dateKey) {
+    if (!dateKey || dateKey === this.state.selectedDay.value) return;
+    this.state.selectedDay = nextVersioned(
+      this.state,
+      dateKey,
+      this.local.deviceId,
+      Date.now()
+    );
+    this.applyRuntimeState();
+    this.schedulePersist();
+  }
+  setAutomationDevice(deviceId) {
+    if (deviceId === this.state.automationDeviceId.value) return;
+    this.state.automationDeviceId = nextVersioned(
+      this.state,
+      deviceId,
+      this.local.deviceId,
+      Date.now()
+    );
+    this.applyRuntimeState();
+    this.schedulePersist();
+  }
+  setPathAlias(oldPath, newPath) {
+    if (!oldPath || oldPath === newPath) return;
+    this.state.pathAliases[oldPath] = nextVersioned(
+      this.state,
+      newPath,
+      this.local.deviceId,
+      Date.now()
+    );
+    this.applyRuntimeState();
+    this.schedulePersist();
+  }
+  clearActivity() {
+    const now = Date.now();
+    const epoch = `epoch-${this.local.deviceId}-${now}`;
+    this.state.activityEpoch = nextVersioned(
+      this.state,
+      epoch,
+      this.local.deviceId,
+      now
+    );
+    const previous = this.state.activityShards[this.local.deviceId];
+    this.state.activityShards[this.local.deviceId] = {
+      deviceId: this.local.deviceId,
+      deviceName: this.local.deviceName,
+      epoch,
+      revision: (previous?.revision ?? 0) + 1,
+      updatedAt: now,
+      days: {}
+    };
+    this.saveLocalShardBackup();
+    this.applyRuntimeState();
+    this.schedulePersist();
+  }
+  clearTimers() {
+    if (this.idleTimer !== null) window.clearTimeout(this.idleTimer);
+    if (this.maxTimer !== null) window.clearTimeout(this.maxTimer);
+    this.idleTimer = null;
+    this.maxTimer = null;
+  }
+  schedulePersist() {
+    if (this.idleTimer !== null) window.clearTimeout(this.idleTimer);
+    this.idleTimer = window.setTimeout(() => void this.flush(), IDLE_SAVE_MS);
+    if (this.maxTimer === null) {
+      this.maxTimer = window.setTimeout(() => void this.flush(), MAX_SAVE_MS);
+    }
+  }
+  async flush() {
+    if (!this.state) return;
+    this.clearTimers();
+    this.writeQueue = this.writeQueue.catch(() => void 0).then(async () => {
+      const diskMigration = migratePersistedData(
+        await this.transport.read(),
+        this.local.deviceId,
+        this.local.deviceName,
+        this.plugin.selectedDay,
+        Date.now()
+      );
+      this.migrateSecrets(
+        diskMigration.legacySecrets.aiApiKey,
+        diskMigration.legacySecrets.notifyWebhook
+      );
+      const disk = diskMigration.state;
+      const diskFingerprint = stateFingerprint(disk);
+      this.state = mergeStates(this.state, disk);
+      this.ensureOwnShard();
+      this.saveLocalShardBackup();
+      this.applyRuntimeState();
+      const fingerprint = stateFingerprint(this.state);
+      if (!diskMigration.migrated && fingerprint === diskFingerprint) return;
+      await this.transport.publish(this.state);
+    });
+    try {
+      await this.writeQueue;
+    } catch (error) {
+      console.error("vault-activity-heatmap: failed to persist synchronized state", error);
+      if (!this.stopping) this.schedulePersist();
+    }
+  }
+  async refreshFromDisk() {
+    if (!this.started) return;
+    await this.transport.refresh();
+  }
+  async stop() {
+    this.stopping = true;
+    await this.flush();
+    await this.transport.stop();
+  }
+};
+
+// src/services/sync-transport.ts
+var VaultSyncTransport = class {
+  constructor(plugin) {
+    this.plugin = plugin;
+    this.onRemoteState = null;
+  }
+  async start(onRemoteState) {
+    this.onRemoteState = onRemoteState;
+    await this.refresh();
+  }
+  async read() {
+    const data = await this.plugin.loadData();
+    return data;
+  }
+  async publish(state) {
+    await this.plugin.saveData(state);
+  }
+  async refresh() {
+    const handler = this.onRemoteState;
+    if (!handler) return;
+    await handler(await this.read());
+  }
+  async stop() {
+    this.onRemoteState = null;
+  }
+};
+
+// src/ui/add-task-modal.ts
+var import_obsidian7 = require("obsidian");
+var AddTaskModal = class extends import_obsidian7.Modal {
   constructor(app, dateKey, onSubmit) {
     super(app);
     this.dateKey = dateKey;
@@ -741,7 +1677,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
       this.close();
       this.onSubmit(text);
     };
-    new import_obsidian6.Setting(this.contentEl).setName("Task").addText((text) => {
+    new import_obsidian7.Setting(this.contentEl).setName("Task").addText((text) => {
       text.setPlaceholder("What needs doing?");
       text.onChange((v) => value = v);
       text.inputEl.addEventListener("keydown", (e) => {
@@ -753,7 +1689,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
       });
       window.setTimeout(() => text.inputEl.focus(), 0);
     });
-    new import_obsidian6.Setting(this.contentEl).addButton(
+    new import_obsidian7.Setting(this.contentEl).addButton(
       (btn) => btn.setButtonText("Add task").setCta().onClick(submit)
     );
   }
@@ -763,7 +1699,7 @@ var AddTaskModal = class extends import_obsidian6.Modal {
 };
 
 // src/ui/heatmap-view.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/utils/color.ts
 function hexToRgb(hex) {
@@ -782,7 +1718,9 @@ function parseColorInput(input) {
   if (!s) return null;
   const hexMatch = s.match(/^#([0-9a-f]{6}|[0-9a-f]{3})$/i) ?? s.match(/^([0-9a-f]{6})$/i);
   if (hexMatch) {
-    let h = hexMatch[1].toLowerCase();
+    const match = hexMatch[1];
+    if (!match) return null;
+    let h = match.toLowerCase();
     if (h.length === 3) h = h.split("").map((c) => c + c).join("");
     return "#" + h;
   }
@@ -794,12 +1732,12 @@ function parseColorInput(input) {
 }
 function levelColor(baseColor, level) {
   const [r, g, b] = hexToRgb(baseColor);
-  const alpha = [0.3, 0.55, 0.8, 1][Math.max(0, Math.min(3, level - 1))];
+  const alpha = [0.3, 0.55, 0.8, 1][Math.max(0, Math.min(3, level - 1))] ?? 1;
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 // src/ui/heatmap-view.ts
-var HeatmapView = class extends import_obsidian7.ItemView {
+var HeatmapView = class extends import_obsidian8.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.detailEl = null;
@@ -807,6 +1745,14 @@ var HeatmapView = class extends import_obsidian7.ItemView {
     this.completedOpen = false;
     this.detailToken = 0;
     this.pendingRender = false;
+    this.sheetOpen = false;
+    this.focusSheetOnLoad = false;
+    this.restoreCellFocusKey = null;
+    this.suppressCellClickUntil = 0;
+    this.backdropVideo = null;
+    this.backdropObserver = null;
+    this.motionQuery = null;
+    this.motionListener = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -819,7 +1765,14 @@ var HeatmapView = class extends import_obsidian7.ItemView {
     return "calendar-check";
   }
   async onOpen() {
+    this.registerDomEvent(activeDocument, "visibilitychange", () => {
+      if (activeDocument.visibilityState === "hidden") this.pauseBackdrop();
+      else this.resumeBackdrop();
+    });
     this.render();
+  }
+  async onClose() {
+    this.destroyBackdrop();
   }
   render() {
     const active = activeDocument.activeElement;
@@ -828,18 +1781,19 @@ var HeatmapView = class extends import_obsidian7.ItemView {
       return;
     }
     this.pendingRender = false;
+    this.destroyBackdrop();
     const plugin = this.plugin;
     const settings = plugin.settings;
     const folderPaths = plugin.allFolderPaths();
     let folder = settings.lastFolderFilter;
     if (folder && !folderPaths.includes(folder)) {
-      folder = "";
-      plugin.settings.lastFolderFilter = "";
-      void plugin.persist();
+      plugin.setLocalFolderFilter("");
+      return;
     }
     const root = this.contentEl;
     root.empty();
     const shell = root.createDiv({ cls: "vah-container" });
+    if (import_obsidian8.Platform.isPhone) shell.addClass("vah-phone");
     this.applyPanelTheme(shell);
     const container = shell.createDiv({ cls: "vah-content" });
     const allNotes = plugin.app.vault.getMarkdownFiles().filter((f) => isUnderFolder(f.path, folder)).length;
@@ -852,16 +1806,14 @@ var HeatmapView = class extends import_obsidian7.ItemView {
     this.statBlock(stats, String(activeDays), "Days");
     this.statBlock(stats, String(streak), "Streak");
     const controls = container.createDiv({ cls: "vah-controls" });
-    const dropdown = new import_obsidian7.DropdownComponent(controls);
+    const dropdown = new import_obsidian8.DropdownComponent(controls);
     dropdown.addOption("", "Whole vault");
     for (const path of folderPaths) {
       dropdown.addOption(path, path);
     }
     dropdown.setValue(folder);
     dropdown.onChange((value) => {
-      plugin.settings.lastFolderFilter = value;
-      void plugin.persist();
-      this.render();
+      plugin.setLocalFolderFilter(value);
     });
     if (Object.keys(plugin.activity.days).length === 0) {
       const hint = container.createDiv({ cls: "vah-hint" });
@@ -885,48 +1837,82 @@ var HeatmapView = class extends import_obsidian7.ItemView {
     const weekdays = body.createDiv({ cls: "vah-weekdays" });
     for (let row = 0; row < 7; row++) {
       const label = weekdays.createDiv({ cls: "vah-weekday" });
-      if (row % 2 === 1) label.setText(DAY_NAMES[(firstDow + row) % 7]);
+      if (row % 2 === 1) label.setText(DAY_NAMES[(firstDow + row) % 7] ?? "");
     }
-    const grid = body.createDiv({ cls: "vah-grid" });
+    const grid = body.createDiv({
+      cls: "vah-grid",
+      attr: { role: "grid", "aria-label": "Activity by day" }
+    });
+    const cellsByDate = /* @__PURE__ */ new Map();
     const cursor = new Date(start);
     let prevMonth = -1;
     for (let w = 0; w < weeks; w++) {
       const monthSlot = monthsRow.createDiv({ cls: "vah-month-slot" });
       const columnMonth = cursor.getMonth();
       if (columnMonth !== prevMonth) {
-        monthSlot.setText(MONTH_NAMES[columnMonth]);
+        monthSlot.setText(MONTH_NAMES[columnMonth] ?? "");
         prevMonth = columnMonth;
       }
-      const weekEl = grid.createDiv({ cls: "vah-week" });
+      const weekEl = grid.createDiv({ cls: "vah-week", attr: { role: "row" } });
       for (let row = 0; row < 7; row++) {
-        const cell = weekEl.createDiv({ cls: "vah-cell" });
         const key = toDateKey(cursor);
         const isFuture = cursor.getTime() > today.getTime();
+        const cell = weekEl.createEl("button", {
+          cls: "vah-cell",
+          attr: {
+            type: "button",
+            role: "gridcell",
+            "data-date": key,
+            "aria-selected": String(key === plugin.selectedDay)
+          }
+        });
+        cellsByDate.set(key, cell);
         if (settings.emptyColor) {
           cell.setCssStyles({ backgroundColor: settings.emptyColor });
         }
-        if (isFuture) {
-          cell.addClass("vah-future");
-          cell.setAttr("title", `${key} - upcoming`);
-          this.attachCellMenu(cell, key);
-          cursor.setDate(cursor.getDate() + 1);
-          continue;
-        }
-        const count = plugin.countForDay(key, folder);
-        const level = plugin.intensityLevel(count);
-        if (level > 0) {
+        const count = isFuture ? 0 : plugin.countForDay(key, folder);
+        const level = isFuture ? 0 : plugin.intensityLevel(count);
+        if (!isFuture && level > 0) {
           cell.setCssStyles({
             backgroundColor: levelColor(settings.baseColor, level)
           });
         }
-        if (key === todayKey) cell.addClass("vah-today");
+        if (isFuture) cell.addClass("vah-future");
+        if (key === todayKey) {
+          cell.addClass("vah-today");
+          cell.setAttr("aria-current", "date");
+        }
+        if (key === plugin.selectedDay) cell.addClass("vah-selected");
         const noun = settings.metric === "edits" ? "edits" : "notes";
-        cell.setAttr("title", `${key} - ${count} ${noun}`);
-        cell.addEventListener("click", () => void this.showDetail(key, folder));
+        const label = isFuture ? `${key} - upcoming` : `${key} - ${count} ${noun}`;
+        cell.setAttr("title", label);
+        cell.setAttr("aria-label", label);
+        cell.tabIndex = key === plugin.selectedDay || key === todayKey ? 0 : -1;
+        cell.addEventListener("click", () => {
+          if (Date.now() < this.suppressCellClickUntil) return;
+          this.selectDay(key);
+        });
+        cell.addEventListener("keydown", (event) => {
+          const delta = event.key === "ArrowLeft" ? -7 : event.key === "ArrowRight" ? 7 : event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
+          if (!delta) return;
+          event.preventDefault();
+          const targetDate = /* @__PURE__ */ new Date(`${key}T00:00:00`);
+          targetDate.setDate(targetDate.getDate() + delta);
+          const target = cellsByDate.get(toDateKey(targetDate));
+          if (!target) return;
+          for (const candidate of cellsByDate.values()) candidate.tabIndex = -1;
+          target.tabIndex = 0;
+          target.focus();
+        });
         this.attachCellMenu(cell, key);
         cursor.setDate(cursor.getDate() + 1);
       }
     }
+    for (const cell of cellsByDate.values()) cell.tabIndex = -1;
+    (cellsByDate.get(plugin.selectedDay) ?? cellsByDate.get(todayKey))?.setAttr(
+      "tabindex",
+      "0"
+    );
     const legend = container.createDiv({ cls: "vah-legend" });
     legend.createSpan({ text: "Less" });
     for (let level = 0; level <= 4; level++) {
@@ -941,11 +1927,95 @@ var HeatmapView = class extends import_obsidian7.ItemView {
       }
     }
     legend.createSpan({ text: "More" });
-    this.detailEl = container.createDiv({ cls: "vah-detail" });
-    void this.showDetail(this.lastDetailKey ?? todayKey, folder);
+    let scrim = null;
+    if (import_obsidian8.Platform.isPhone) {
+      scrim = container.createDiv({
+        cls: "vah-sheet-scrim",
+        attr: { "aria-hidden": "true" }
+      });
+      if (this.sheetOpen) scrim.addClass("is-open");
+      scrim.addEventListener("click", () => this.closeDetailSheet());
+    }
+    this.detailEl = container.createDiv({
+      cls: import_obsidian8.Platform.isPhone ? "vah-detail vah-detail-sheet" : "vah-detail"
+    });
+    if (import_obsidian8.Platform.isPhone) {
+      this.detailEl.setAttrs({
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-label": "Day details",
+        "aria-hidden": String(!this.sheetOpen)
+      });
+      this.detailEl.tabIndex = -1;
+      this.detailEl.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          this.closeDetailSheet();
+        } else if (event.key === "Tab") {
+          this.trapSheetFocus(event);
+        }
+      });
+      if (this.sheetOpen) {
+        this.detailEl.addClass("is-open");
+        for (const child of Array.from(container.children)) {
+          if (child !== this.detailEl && child !== scrim) {
+            child.setAttr("inert", "");
+          }
+        }
+      }
+    }
+    this.lastDetailKey = plugin.selectedDay || todayKey;
+    if (!import_obsidian8.Platform.isPhone || this.sheetOpen) {
+      void this.showDetail(this.lastDetailKey, folder);
+    }
     window.requestAnimationFrame(() => {
       scroll.scrollLeft = scroll.scrollWidth;
+      if (this.restoreCellFocusKey) {
+        const key = this.restoreCellFocusKey;
+        this.restoreCellFocusKey = null;
+        root.querySelector(`button[data-date="${key}"]`)?.focus();
+      }
     });
+  }
+  selectDay(key) {
+    this.lastDetailKey = key;
+    if (import_obsidian8.Platform.isPhone) {
+      this.sheetOpen = true;
+      this.focusSheetOnLoad = true;
+    }
+    if (key === this.plugin.selectedDay) this.render();
+    else this.plugin.setSelectedDay(key);
+  }
+  closeDetailSheet() {
+    this.detailToken += 1;
+    this.sheetOpen = false;
+    this.focusSheetOnLoad = false;
+    this.restoreCellFocusKey = this.lastDetailKey;
+    this.render();
+  }
+  trapSheetFocus(event) {
+    const detail = this.detailEl;
+    if (!detail) return;
+    const focusable = Array.from(
+      detail.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((element) => element.offsetParent !== null);
+    if (focusable.length === 0) {
+      event.preventDefault();
+      detail.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!first || !last) return;
+    if (event.shiftKey && detail.ownerDocument.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && detail.ownerDocument.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
   /**
    * Panel-scoped theming: custom text/background colors and an image or
@@ -972,10 +2042,27 @@ var HeatmapView = class extends import_obsidian7.ItemView {
     if (isVideo) {
       const video = backdrop.createEl("video");
       video.src = url;
-      video.autoplay = true;
+      const reducedMotion = shell.win.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      video.autoplay = !reducedMotion;
       video.loop = true;
       video.muted = true;
       video.setAttr("playsinline", "");
+      this.backdropVideo = video;
+      this.motionQuery = video.win.matchMedia("(prefers-reduced-motion: reduce)");
+      this.motionListener = () => {
+        if (this.motionQuery?.matches) this.pauseBackdrop();
+        else this.resumeBackdrop();
+      };
+      this.motionQuery.addEventListener("change", this.motionListener);
+      if (reducedMotion) {
+        video.addEventListener("loadeddata", () => video.pause(), { once: true });
+      }
+      const observer = new IntersectionObserver((entries) => {
+        if (entries[0]?.isIntersecting) this.resumeBackdrop();
+        else this.pauseBackdrop();
+      });
+      this.backdropObserver = observer;
+      observer.observe(video);
       media = video;
     } else {
       media = backdrop.createEl("img", { attr: { src: url } });
@@ -992,23 +2079,99 @@ var HeatmapView = class extends import_obsidian7.ItemView {
       backgroundColor: `rgba(0, 0, 0, ${s.backdropDim})`
     });
   }
-  /** Right-click menu: add a task to / open the day's reflection note. */
+  pauseBackdrop() {
+    this.backdropVideo?.pause();
+  }
+  destroyBackdrop() {
+    this.backdropObserver?.disconnect();
+    this.backdropObserver = null;
+    if (this.motionQuery && this.motionListener) {
+      this.motionQuery.removeEventListener("change", this.motionListener);
+    }
+    this.motionQuery = null;
+    this.motionListener = null;
+    const video = this.backdropVideo;
+    this.backdropVideo = null;
+    if (!video) return;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  }
+  resumeBackdrop() {
+    const video = this.backdropVideo;
+    if (!video || video.ownerDocument.visibilityState === "hidden") return;
+    if (video.win.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    void video.play().catch(() => void 0);
+  }
+  createCellMenu(dateKey) {
+    const menu = new import_obsidian8.Menu();
+    menu.addItem(
+      (item) => item.setTitle("Add task to daily reflection...").setIcon("check-square").onClick(() => {
+        new AddTaskModal(this.plugin.app, dateKey, (text) => {
+          void this.plugin.addTaskToDailyReflection(dateKey, text);
+        }).open();
+      })
+    );
+    menu.addItem(
+      (item) => item.setTitle("Open daily reflection note").setIcon("file-text").onClick(() => void this.plugin.openDailyReflection(dateKey))
+    );
+    return menu;
+  }
+  /** Right-click and long-press menu for reflection actions. */
   attachCellMenu(cell, dateKey) {
+    let suppressContextMenuUntil = 0;
     cell.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      const menu = new import_obsidian7.Menu();
-      menu.addItem(
-        (item) => item.setTitle("Add task to daily reflection...").setIcon("check-square").onClick(() => {
-          new AddTaskModal(this.plugin.app, dateKey, (text) => {
-            void this.plugin.addTaskToDailyReflection(dateKey, text);
-          }).open();
-        })
-      );
-      menu.addItem(
-        (item) => item.setTitle("Open daily reflection note").setIcon("file-text").onClick(() => void this.plugin.openDailyReflection(dateKey))
-      );
-      menu.showAtMouseEvent(e);
+      if (Date.now() < suppressContextMenuUntil) return;
+      if (e.clientX === 0 && e.clientY === 0) {
+        const rect = cell.getBoundingClientRect();
+        this.createCellMenu(dateKey).showAtPosition(
+          { x: rect.left, y: rect.bottom },
+          cell.ownerDocument
+        );
+      } else {
+        this.createCellMenu(dateKey).showAtMouseEvent(e);
+      }
     });
+    cell.addEventListener("keydown", (event) => {
+      if (event.key !== "F10" || !event.shiftKey) return;
+      event.preventDefault();
+      const rect = cell.getBoundingClientRect();
+      this.createCellMenu(dateKey).showAtPosition(
+        { x: rect.left, y: rect.bottom },
+        cell.ownerDocument
+      );
+    });
+    if (!import_obsidian8.Platform.isMobile) return;
+    let timer = null;
+    let startX = 0;
+    let startY = 0;
+    const cancel = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+    };
+    cell.addEventListener("pointerdown", (event) => {
+      if (!event.isPrimary || event.button !== 0) return;
+      startX = event.clientX;
+      startY = event.clientY;
+      cancel();
+      timer = window.setTimeout(() => {
+        timer = null;
+        this.suppressCellClickUntil = Date.now() + 700;
+        suppressContextMenuUntil = Date.now() + 700;
+        this.createCellMenu(dateKey).showAtPosition(
+          { x: startX, y: startY },
+          cell.ownerDocument
+        );
+      }, 500);
+    });
+    cell.addEventListener("pointermove", (event) => {
+      if (Math.hypot(event.clientX - startX, event.clientY - startY) > 10) cancel();
+    });
+    cell.addEventListener("pointerup", cancel);
+    cell.addEventListener("pointercancel", cancel);
+    cell.addEventListener("pointerleave", cancel);
+    cell.addEventListener("lostpointercapture", cancel);
   }
   statBlock(parent, value, label) {
     const el = parent.createDiv({ cls: "vah-stat" });
@@ -1037,9 +2200,38 @@ var HeatmapView = class extends import_obsidian7.ItemView {
     const detail = this.detailEl;
     detail.empty();
     const files = this.plugin.filesForDay(key, folder);
-    detail.createEl("h6", {
+    const detailHeader = detail.createDiv({ cls: "vah-detail-header" });
+    detailHeader.createEl("h6", {
       text: `${key} - ${files.length} note${files.length === 1 ? "" : "s"}`
     });
+    if (import_obsidian8.Platform.isPhone) {
+      const actions = detailHeader.createDiv({ cls: "vah-detail-actions" });
+      const addTask = actions.createEl("button", {
+        cls: "clickable-icon",
+        attr: { type: "button", "aria-label": "Add task" }
+      });
+      (0, import_obsidian8.setIcon)(addTask, "plus");
+      addTask.setAttr("title", "Add task");
+      addTask.addEventListener("click", () => {
+        new AddTaskModal(this.plugin.app, key, (text) => {
+          void this.plugin.addTaskToDailyReflection(key, text).then(() => this.showDetail(key, folder));
+        }).open();
+      });
+      const openNote = actions.createEl("button", {
+        cls: "clickable-icon",
+        attr: { type: "button", "aria-label": "Open daily reflection note" }
+      });
+      (0, import_obsidian8.setIcon)(openNote, "file-text");
+      openNote.setAttr("title", "Open daily reflection note");
+      openNote.addEventListener("click", () => void this.plugin.openDailyReflection(key));
+      const close = actions.createEl("button", {
+        cls: "clickable-icon",
+        attr: { type: "button", "aria-label": "Close day details" }
+      });
+      (0, import_obsidian8.setIcon)(close, "x");
+      close.setAttr("title", "Close day details");
+      close.addEventListener("click", () => this.closeDetailSheet());
+    }
     if (daily) this.renderTasks(detail, key, folder, daily, focusAddInput);
     if (files.length > 0) {
       const section = detail.createDiv({ cls: "vah-section" });
@@ -1058,8 +2250,7 @@ var HeatmapView = class extends import_obsidian7.ItemView {
       );
       toggle.addEventListener("click", () => {
         this.plugin.settings.notesPathDisplay = showingFull ? "name" : "full";
-        void this.plugin.persist();
-        void this.showDetail(key, folder);
+        this.plugin.saveSettings();
       });
       const labels = notePathLabels(
         files.map(([path]) => path),
@@ -1068,9 +2259,12 @@ var HeatmapView = class extends import_obsidian7.ItemView {
       const list = section.createDiv({ cls: "vah-detail-list" });
       files.forEach(([path, edits], i) => {
         const row = list.createDiv({ cls: "vah-detail-row" });
-        const link = row.createSpan({ cls: "vah-detail-link" });
         const file = this.plugin.app.vault.getAbstractFileByPath(path);
-        const label = labels[i];
+        const link = file instanceof import_obsidian8.TFile ? row.createEl("button", {
+          cls: "vah-detail-link vah-detail-link-live",
+          attr: { type: "button" }
+        }) : row.createSpan({ cls: "vah-detail-link" });
+        const label = labels[i] ?? path.replace(/\.md$/, "");
         const slash = label.lastIndexOf("/");
         if (slash >= 0) {
           link.createSpan({
@@ -1080,8 +2274,7 @@ var HeatmapView = class extends import_obsidian7.ItemView {
         }
         link.createSpan({ cls: "vah-link-name", text: label.slice(slash + 1) });
         link.setAttr("title", path.replace(/\.md$/, ""));
-        if (file instanceof import_obsidian7.TFile) {
-          link.addClass("vah-detail-link-live");
+        if (file instanceof import_obsidian8.TFile) {
           link.addEventListener("click", () => {
             void this.plugin.app.workspace.getLeaf(false).openFile(file);
           });
@@ -1093,6 +2286,10 @@ var HeatmapView = class extends import_obsidian7.ItemView {
     }
     if (this.plugin.settings.showTimeline) {
       this.renderTimeline(detail, key, folder);
+    }
+    if (import_obsidian8.Platform.isPhone && this.sheetOpen && this.focusSheetOnLoad) {
+      this.focusSheetOnLoad = false;
+      detail.focus();
     }
   }
   /** Microsoft To Do-style task list backed by the day's reflection note. */
@@ -1122,11 +2319,13 @@ var HeatmapView = class extends import_obsidian7.ItemView {
       const row = parent.createDiv({
         cls: "vah-task-row" + (task.done ? " vah-task-done" : "")
       });
-      const circle = row.createSpan({
-        cls: "vah-task-circle" + (task.done ? " vah-task-circle-done" : "")
+      const circle = row.createEl("button", {
+        cls: "vah-task-circle" + (task.done ? " vah-task-circle-done" : ""),
+        attr: { type: "button" }
       });
       circle.setText(task.done ? "x" : "");
       circle.setAttr("title", task.done ? "Mark as not done" : "Mark as done");
+      circle.setAttr("aria-label", task.done ? "Mark as not done" : "Mark as done");
       circle.addEventListener("click", () => {
         const file = daily.file;
         if (!file) return;
@@ -1146,7 +2345,10 @@ var HeatmapView = class extends import_obsidian7.ItemView {
       });
     }
     if (done.length > 0) {
-      const header = section.createDiv({ cls: "vah-task-done-header" });
+      const header = section.createEl("button", {
+        cls: "vah-task-done-header",
+        attr: { type: "button", "aria-expanded": String(this.completedOpen) }
+      });
       header.setText(`${this.completedOpen ? "v" : ">"} Completed ${done.length}`);
       header.addEventListener("click", () => {
         this.completedOpen = !this.completedOpen;
@@ -1162,6 +2364,7 @@ var HeatmapView = class extends import_obsidian7.ItemView {
   renderTimeline(detail, key, folder) {
     const sessions = (this.plugin.activity.days[key]?.sessions ?? []).filter((s) => isUnderFolder(s.f, folder)).sort((a, b) => a.s - b.s);
     if (sessions.length === 0) return;
+    const showDevices = new Set(sessions.map((session) => session.v).filter(Boolean)).size > 1;
     const section = detail.createDiv({ cls: "vah-section" });
     section.createDiv({ cls: "vah-section-title", text: "Timeline" });
     const list = section.createDiv({ cls: "vah-timeline" });
@@ -1169,11 +2372,13 @@ var HeatmapView = class extends import_obsidian7.ItemView {
       const item = list.createDiv({ cls: "vah-tl-item" });
       item.createDiv({ cls: "vah-tl-dot" });
       const name = (s.f.split("/").pop() ?? s.f).replace(/\.md$/, "");
-      const title = item.createDiv({ cls: "vah-tl-title" });
-      title.setText(s.k === "create" ? `${name} - created` : name);
       const target = this.plugin.app.vault.getAbstractFileByPath(s.f);
-      if (target instanceof import_obsidian7.TFile) {
-        title.addClass("vah-detail-link-live");
+      const title = target instanceof import_obsidian8.TFile ? item.createEl("button", {
+        cls: "vah-tl-title vah-detail-link-live",
+        attr: { type: "button" }
+      }) : item.createDiv({ cls: "vah-tl-title" });
+      title.setText(s.k === "create" ? `${name} - created` : name);
+      if (target instanceof import_obsidian8.TFile) {
         title.addEventListener("click", () => {
           void this.plugin.app.workspace.getLeaf(false).openFile(target);
         });
@@ -1182,18 +2387,19 @@ var HeatmapView = class extends import_obsidian7.ItemView {
         s.e - s.s >= 6e4 ? `${formatClockTime(s.s)}-${formatClockTime(s.e)}` : formatClockTime(s.s)
       ];
       if (s.d !== 0) parts.push(formatByteDelta(s.d));
-      if (s.n > 1) parts.push(`${s.n} saves`);
+      if (s.n > 1) parts.push(`${s.n} changes`);
+      if (showDevices && s.v) parts.push(s.v);
       item.createDiv({ cls: "vah-tl-meta", text: parts.join(" | ") });
     }
   }
 };
 
 // src/ui/settings-tab.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 
 // src/ui/confirm-clear-history-modal.ts
-var import_obsidian8 = require("obsidian");
-var ConfirmClearHistoryModal = class extends import_obsidian8.Modal {
+var import_obsidian9 = require("obsidian");
+var ConfirmClearHistoryModal = class extends import_obsidian9.Modal {
   constructor(app, onConfirm) {
     super(app);
     this.onConfirm = onConfirm;
@@ -1203,7 +2409,7 @@ var ConfirmClearHistoryModal = class extends import_obsidian8.Modal {
     this.contentEl.createEl("p", {
       text: "This deletes every recorded activity day for Vault Activity Heatmap. Your notes are not changed, but this history cannot be restored from inside the plugin."
     });
-    new import_obsidian8.Setting(this.contentEl).addButton(
+    new import_obsidian9.Setting(this.contentEl).addButton(
       (button) => button.setButtonText("Cancel").onClick(() => this.close())
     ).addButton(
       (button) => button.setButtonText("Clear history").setDestructive().onClick(() => {
@@ -1218,7 +2424,7 @@ var ConfirmClearHistoryModal = class extends import_obsidian8.Modal {
 };
 
 // src/ui/settings-tab.ts
-var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
+var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1226,15 +2432,15 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    containerEl.addClass("vah-settings");
     const save = async () => {
-      await this.plugin.persist();
-      this.plugin.renderAllViews();
+      this.plugin.saveSettings();
     };
-    new import_obsidian9.Setting(containerEl).setName("Appearance").setHeading();
+    new import_obsidian10.Setting(containerEl).setName("Appearance").setHeading();
     let baseColorPicker = null;
     let baseColorText = null;
     let syncingBaseColor = false;
-    new import_obsidian9.Setting(containerEl).setName("Square color").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Square color").setDesc(
       "Base color of the heatmap squares. Pick it, or type an RGB value like 64, 196, 99 (or a hex code like #40c463)."
     ).addColorPicker((picker) => {
       baseColorPicker = picker;
@@ -1258,7 +2464,7 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian9.Setting(containerEl).setName("Empty square color").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Empty square color").setDesc(
       "Color for days without activity, as RGB or hex. Leave blank to use the theme default."
     ).addText((text) => {
       text.setPlaceholder("theme default").setValue(
@@ -1276,7 +2482,7 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian9.Setting(containerEl).setName("Metric").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Metric").setDesc(
       "What a day's intensity is based on: how many distinct notes you touched, or the total number of edits."
     ).addDropdown(
       (dd) => dd.addOption("files", "Unique notes per day").addOption("edits", "Total edits per day").setValue(this.plugin.settings.metric).onChange(async (value) => {
@@ -1284,7 +2490,7 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Intensity thresholds").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Intensity thresholds").setDesc(
       "Four ascending numbers, comma separated. Example with '1, 3, 6, 10': 1-2 -> lightest, 3-5 -> light, 6-9 -> dark, 10+ -> darkest."
     ).addText(
       (text) => text.setPlaceholder("1, 3, 6, 10").setValue(this.plugin.settings.thresholds.join(", ")).onChange(async (value) => {
@@ -1295,20 +2501,20 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         }
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Weeks to show").setDesc("Width of the heatmap in weeks (26 = half a year, 53 = a full year).").addSlider(
+    new import_obsidian10.Setting(containerEl).setName("Weeks to show").setDesc("Width of the heatmap in weeks (26 = half a year, 53 = a full year).").addSlider(
       (slider) => slider.setLimits(8, 53, 1).setValue(this.plugin.settings.weeksToShow).onChange(async (value) => {
         this.plugin.settings.weeksToShow = value;
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Week starts on").addDropdown(
+    new import_obsidian10.Setting(containerEl).setName("Week starts on").addDropdown(
       (dd) => dd.addOption("1", "Monday").addOption("0", "Sunday").setValue(String(this.plugin.settings.firstDayOfWeek)).onChange(async (value) => {
         this.plugin.settings.firstDayOfWeek = parseInt(value, 10);
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Panel theme").setHeading();
-    new import_obsidian9.Setting(containerEl).setName("Backdrop image or video").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Panel theme").setHeading();
+    new import_obsidian10.Setting(containerEl).setName("Backdrop image or video").setDesc(
       "Vault path (e.g. assets/wall.png or clips/loop.mp4) or an https:// URL. Images (PNG/JPG/GIF/WebP) and auto-looping muted videos (MP4/WebM) are supported. Leave blank for none."
     ).addText(
       (text) => text.setPlaceholder("assets/backdrop.mp4").setValue(this.plugin.settings.backdropPath).onChange(async (value) => {
@@ -1316,19 +2522,19 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Backdrop dim").setDesc("Darkens the backdrop so the heatmap stays readable.").addSlider(
+    new import_obsidian10.Setting(containerEl).setName("Backdrop dim").setDesc("Darkens the backdrop so the heatmap stays readable.").addSlider(
       (slider) => slider.setLimits(0, 90, 5).setValue(Math.round(this.plugin.settings.backdropDim * 100)).onChange(async (value) => {
         this.plugin.settings.backdropDim = value / 100;
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Backdrop blur").setDesc("Blur radius in pixels applied to the backdrop.").addSlider(
+    new import_obsidian10.Setting(containerEl).setName("Backdrop blur").setDesc("Blur radius in pixels applied to the backdrop.").addSlider(
       (slider) => slider.setLimits(0, 20, 1).setValue(this.plugin.settings.backdropBlur).onChange(async (value) => {
         this.plugin.settings.backdropBlur = value;
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Panel text color").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Panel text color").setDesc(
       "Overrides the panel's text color only (RGB or hex). Leave blank for the theme default."
     ).addText((text) => {
       text.setPlaceholder("theme default").setValue(
@@ -1346,7 +2552,7 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian9.Setting(containerEl).setName("Panel background color").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Panel background color").setDesc(
       "Overrides the panel's background only (RGB or hex). Leave blank for the theme default."
     ).addText((text) => {
       text.setPlaceholder("theme default").setValue(
@@ -1364,8 +2570,8 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian9.Setting(containerEl).setName("Tracking").setHeading();
-    new import_obsidian9.Setting(containerEl).setName("Excluded folders").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Tracking").setHeading();
+    new import_obsidian10.Setting(containerEl).setName("Excluded folders").setDesc(
       "Folders that should never count as activity (e.g. templates). One folder path per line."
     ).addTextArea(
       (text) => text.setPlaceholder("templates\narchive/old").setValue(this.plugin.settings.excludeFolders.join("\n")).onChange(async (value) => {
@@ -1373,8 +2579,8 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Daily reflection notes").setHeading();
-    new import_obsidian9.Setting(containerEl).setName("Reflection folder").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Daily reflection notes").setHeading();
+    new import_obsidian10.Setting(containerEl).setName("Reflection folder").setDesc(
       "Folder where daily reflection notes are created when you right-click a square. Leave blank for the vault root."
     ).addText(
       (text) => text.setPlaceholder("Daily reflection").setValue(this.plugin.settings.reflectionFolder).onChange(async (value) => {
@@ -1382,7 +2588,7 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Note name format").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Note name format").setDesc(
       `Date format for the note file name (moment.js syntax). "YYYY-MM-DD" -> ${momentFn().format(
         "YYYY-MM-DD"
       )}.md`
@@ -1392,7 +2598,7 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Tasks heading").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Tasks heading").setDesc(
       'Heading the task is inserted under, e.g. "## Tasks". Created if missing. Leave blank to append tasks at the end of the note.'
     ).addText(
       (text) => text.setPlaceholder("## Tasks").setValue(this.plugin.settings.taskHeading).onChange(async (value) => {
@@ -1400,8 +2606,8 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Day detail").setHeading();
-    new import_obsidian9.Setting(containerEl).setName("Show tasks").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Day detail").setHeading();
+    new import_obsidian10.Setting(containerEl).setName("Show tasks").setDesc(
       "To Do-style task list for the selected day, backed by its daily reflection note."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTasks).onChange(async (value) => {
@@ -1409,7 +2615,7 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Notes edited: path display").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Notes edited: path display").setDesc(
       "Show just the file name (cleaner) or the full folder path in the 'Notes edited' list. You can also flip this with the button on the list itself."
     ).addDropdown(
       (dd) => dd.addOption("name", "File name only").addOption("full", "Full folder path").setValue(this.plugin.settings.notesPathDisplay).onChange(async (value) => {
@@ -1417,7 +2623,7 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Show edit timeline").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Show edit timeline").setDesc(
       "Chronological trail of when each note was edited that day and by how much."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTimeline).onChange(async (value) => {
@@ -1425,7 +2631,7 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Timeline session gap").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("Timeline session gap").setDesc(
       "Saves of the same note within this many minutes merge into one timeline entry."
     ).addSlider(
       (slider) => slider.setLimits(5, 60, 5).setValue(this.plugin.settings.sessionGapMinutes).onChange(async (value) => {
@@ -1433,67 +2639,73 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("AI summaries & notifications").setHeading();
-    new import_obsidian9.Setting(containerEl).setName("Provider").setDesc("Which API the weekly/monthly writing summaries are generated with.").addDropdown(
+    new import_obsidian10.Setting(containerEl).setName("AI summaries & notifications").setHeading();
+    new import_obsidian10.Setting(containerEl).setName("Device name").setDesc("A local label used to identify this device in synchronized timelines.").addText(
+      (text) => text.setPlaceholder("Obsidian device").setValue(this.plugin.sync.deviceName).onChange((value) => this.plugin.setDeviceName(value))
+    );
+    new import_obsidian10.Setting(containerEl).setName("Automation device").setDesc(
+      "Only one device runs automatic summaries, preventing duplicate API requests."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.isAutomationDevice()).onChange((value) => {
+        this.plugin.setAutomationDevice(value ? this.plugin.sync.deviceId : "");
+      })
+    );
+    new import_obsidian10.Setting(containerEl).setName("Provider").setDesc("Which API the weekly/monthly writing summaries are generated with.").addDropdown(
       (dd) => dd.addOption("anthropic", "Anthropic (Claude)").addOption("openai", "OpenAI-compatible").setValue(this.plugin.settings.aiProvider).onChange(async (value) => {
         this.plugin.settings.aiProvider = value;
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("API key").setDesc(
-      "Stored in this plugin's data.json inside your vault - do not share that file."
-    ).addText((text) => {
-      text.setPlaceholder("sk-...").setValue(this.plugin.settings.aiApiKey).onChange(async (value) => {
-        this.plugin.settings.aiApiKey = value.trim();
-        await save();
-      });
-      text.inputEl.type = "password";
-    });
-    new import_obsidian9.Setting(containerEl).setName("Model").setDesc("Blank uses the provider default (claude-sonnet-5 / gpt-4o-mini).").addText(
+    new import_obsidian10.Setting(containerEl).setName("API key").setDesc(
+      "Stored securely on this device. Select an existing secret or create one."
+    ).addComponent(
+      (el) => new import_obsidian10.SecretComponent(this.app, el).setValue(this.plugin.settings.aiSecretId).onChange((value) => this.plugin.setAiSecretId(value))
+    );
+    new import_obsidian10.Setting(containerEl).setName("Model").setDesc("Blank uses the provider default (claude-sonnet-5 / gpt-4o-mini).").addText(
       (text) => text.setPlaceholder("claude-sonnet-5").setValue(this.plugin.settings.aiModel).onChange(async (value) => {
         this.plugin.settings.aiModel = value.trim();
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("API base URL").setDesc("Optional override for proxies or self-hosted gateways.").addText(
+    new import_obsidian10.Setting(containerEl).setName("API base URL").setDesc("Optional override for proxies or self-hosted gateways.").addText(
       (text) => text.setPlaceholder("https://api.anthropic.com").setValue(this.plugin.settings.aiBaseUrl).onChange(async (value) => {
         this.plugin.settings.aiBaseUrl = value.trim();
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Summary folder").setDesc("Where generated summary notes are saved.").addText(
+    new import_obsidian10.Setting(containerEl).setName("Summary folder").setDesc("Where generated summary notes are saved.").addText(
       (text) => text.setPlaceholder("AI summaries").setValue(this.plugin.settings.aiSummaryFolder).onChange(async (value) => {
         this.plugin.settings.aiSummaryFolder = value;
         await save();
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Auto-summarize each week").setDesc("When a new week starts, the completed week is summarized automatically.").addToggle(
+    new import_obsidian10.Setting(containerEl).setName("Auto-summarize each week").setDesc("When a new week starts, the completed week is summarized automatically.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.aiAutoWeekly).onChange(async (value) => {
         this.plugin.settings.aiAutoWeekly = value;
         await save();
+        if (value) this.plugin.setAutomationDevice(this.plugin.sync.deviceId);
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Auto-summarize each month").setDesc("When a new month starts, the completed month is summarized automatically.").addToggle(
+    new import_obsidian10.Setting(containerEl).setName("Auto-summarize each month").setDesc("When a new month starts, the completed month is summarized automatically.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.aiAutoMonthly).onChange(async (value) => {
         this.plugin.settings.aiAutoMonthly = value;
         await save();
+        if (value) this.plugin.setAutomationDevice(this.plugin.sync.deviceId);
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Desktop notification").setDesc("Show a system notification on this computer when a summary is ready.").addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.notifyDesktop).onChange(async (value) => {
-        this.plugin.settings.notifyDesktop = value;
-        await save();
+    new import_obsidian10.Setting(containerEl).setName("System notification").setDesc(
+      "Show a desktop notification or an in-app mobile notice when a summary is ready."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.notifyDesktop).onChange((value) => {
+        this.plugin.setLocalNotificationEnabled(value);
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("Phone notification webhook").setDesc(
-      "POST endpoint pinged when a summary is ready. Easiest setup: install the free ntfy app on your phone, subscribe to a private topic, and enter https://ntfy.sh/your-topic here."
-    ).addText(
-      (text) => text.setPlaceholder("https://ntfy.sh/your-topic").setValue(this.plugin.settings.notifyWebhook).onChange(async (value) => {
-        this.plugin.settings.notifyWebhook = value.trim();
-        await save();
-      })
+    new import_obsidian10.Setting(containerEl).setName("Phone notification webhook").setDesc(
+      "Securely stored POST endpoint pinged when a summary is ready, such as a private ntfy topic."
+    ).addComponent(
+      (el) => new import_obsidian10.SecretComponent(this.app, el).setValue(this.plugin.settings.notifySecretId).onChange((value) => this.plugin.setNotificationSecretId(value))
     );
-    new import_obsidian9.Setting(containerEl).setName("Run now").setDesc("Generate a summary of the current period immediately.").addButton(
+    new import_obsidian10.Setting(containerEl).setName("Run now").setDesc("Generate a summary of the current period immediately.").addButton(
       (btn) => btn.setButtonText("This week").onClick(() => {
         const start = this.plugin.weekStartOf(/* @__PURE__ */ new Date());
         void this.plugin.summarizePeriod(
@@ -1517,13 +2729,13 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
         );
       })
     );
-    new import_obsidian9.Setting(containerEl).setName("History").setHeading();
-    new import_obsidian9.Setting(containerEl).setName("Backfill from existing notes").setDesc(
+    new import_obsidian10.Setting(containerEl).setName("History").setHeading();
+    new import_obsidian10.Setting(containerEl).setName("Backfill from existing notes").setDesc(
       "Seed the heatmap from every note's created and last-modified dates. Safe to run repeatedly - it never overwrites live tracking data."
     ).addButton(
       (btn) => btn.setButtonText("Backfill").onClick(() => this.plugin.backfillFromFileStats())
     );
-    new import_obsidian9.Setting(containerEl).setName("Clear all history").setDesc("Deletes every recorded day. This cannot be undone.").addButton(
+    new import_obsidian10.Setting(containerEl).setName("Clear all history").setDesc("Deletes every recorded day. This cannot be undone.").addButton(
       (btn) => btn.setButtonText("Clear").setDestructive().onClick(() => {
         new ConfirmClearHistoryModal(
           this.app,
@@ -1535,18 +2747,20 @@ var HeatmapSettingTab = class extends import_obsidian9.PluginSettingTab {
 };
 
 // src/main.ts
-var VaultActivityHeatmapPlugin = class extends import_obsidian10.Plugin {
+var VaultActivityHeatmapPlugin = class extends import_obsidian11.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
     this.activity = { days: {} };
+    this.selectedDay = toDateKey(/* @__PURE__ */ new Date());
+    this.sync = new SyncService(this, new VaultSyncTransport(this));
     this.activityService = new ActivityService(this);
     this.dailyNotes = new DailyNotesService(this);
     this.aiSummary = new AiSummaryService(this);
     this.notifications = new NotificationService(this);
   }
   async onload() {
-    await this.loadPersisted();
+    await this.sync.start();
     this.registerView(VIEW_TYPE_HEATMAP, (leaf) => new HeatmapView(leaf, this));
     this.addRibbonIcon("calendar-check", "Open activity heatmap", () => {
       void this.activateView();
@@ -1600,36 +2814,76 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian10.Plugin {
       }
     });
     this.addSettingTab(new HeatmapSettingTab(this.app, this));
+    this.registerDomEvent(activeDocument, "visibilitychange", () => {
+      if (activeDocument.visibilityState === "hidden") void this.sync.flush();
+      else void this.sync.refreshFromDisk();
+    });
     this.app.workspace.onLayoutReady(() => {
       this.activityService.primeLastSizes();
       this.registerEvent(
-        this.app.vault.on("create", (f) => this.recordActivity(f, true))
-      );
-      this.registerEvent(
-        this.app.vault.on("modify", (f) => this.recordActivity(f))
+        this.app.workspace.on("editor-change", (editor, info) => {
+          if (info.file) this.activityService.recordEditorChange(info.file, editor.getValue());
+        })
       );
       this.registerEvent(
         this.app.vault.on("rename", (f, oldPath) => this.migratePath(f, oldPath))
       );
-      window.setTimeout(() => this.maybeAutoSummarize(), 3e4);
+      window.setTimeout(() => void this.maybeAutoSummarize(), 3e4);
       this.registerInterval(
-        window.setInterval(() => this.maybeAutoSummarize(), 60 * 60 * 1e3)
+        window.setInterval(() => void this.maybeAutoSummarize(), 60 * 60 * 1e3)
       );
     });
   }
   onunload() {
-    void this.persist();
+    this.activityService.stop();
+    void this.sync.stop();
   }
-  async loadPersisted() {
-    const raw = await this.loadData();
-    if (raw?.settings) this.settings = { ...DEFAULT_SETTINGS, ...raw.settings };
-    if (raw?.activity?.days) this.activity = { days: raw.activity.days };
+  onExternalSettingsChange() {
+    return this.sync.refreshFromDisk();
   }
   async persist() {
-    await this.saveData({
-      settings: this.settings,
-      activity: this.activity
+    await this.sync.flush();
+  }
+  saveSettings() {
+    this.sync.updateSharedSettings(this.settings);
+  }
+  setLocalFolderFilter(folder) {
+    this.sync.updateLocalSettings({ lastFolderFilter: folder });
+  }
+  setLocalNotificationEnabled(enabled) {
+    this.sync.updateLocalSettings({ notifyDesktop: enabled });
+  }
+  setDeviceName(name) {
+    this.sync.updateLocalSettings({ deviceName: name.trim() || "Obsidian device" });
+  }
+  setAiSecretId(id) {
+    this.sync.updateLocalSettings({
+      aiSecretId: /^[a-z0-9-]+$/.test(id) ? id : DEFAULT_SETTINGS.aiSecretId
     });
+  }
+  setNotificationSecretId(id) {
+    this.sync.updateLocalSettings({
+      notifySecretId: /^[a-z0-9-]+$/.test(id) ? id : DEFAULT_SETTINGS.notifySecretId
+    });
+  }
+  setSelectedDay(dateKey) {
+    this.sync.setSelectedDay(dateKey);
+  }
+  setAutomationDevice(deviceId) {
+    this.sync.setAutomationDevice(deviceId);
+  }
+  isAutomationDevice() {
+    return this.sync.automationDeviceId === this.sync.deviceId;
+  }
+  getAiApiKey() {
+    const id = this.settings.aiSecretId.trim();
+    if (!/^[a-z0-9-]+$/.test(id)) return "";
+    return this.app.secretStorage.getSecret(id) ?? "";
+  }
+  getNotificationWebhook() {
+    const id = this.settings.notifySecretId.trim();
+    if (!/^[a-z0-9-]+$/.test(id)) return "";
+    return this.app.secretStorage.getSecret(id) ?? "";
   }
   recordActivity(file, isCreate = false) {
     this.activityService.recordActivity(file, isCreate);
@@ -1661,8 +2915,8 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian10.Plugin {
   weekStartOf(date) {
     return weekStartOf(date, this.settings.firstDayOfWeek);
   }
-  maybeAutoSummarize() {
-    this.aiSummary.maybeAutoSummarize();
+  async maybeAutoSummarize() {
+    await this.aiSummary.maybeAutoSummarize();
   }
   async summarizePeriod(startKey, endKey, label, noteName) {
     await this.aiSummary.summarizePeriod(startKey, endKey, label, noteName);
@@ -1672,19 +2926,20 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian10.Plugin {
     const s = setting.trim();
     if (!s) return null;
     if (/^https?:\/\//i.test(s)) return s;
-    const f = this.app.vault.getAbstractFileByPath((0, import_obsidian10.normalizePath)(s));
-    if (f instanceof import_obsidian10.TFile) return this.app.vault.getResourcePath(f);
+    const f = this.app.vault.getAbstractFileByPath((0, import_obsidian11.normalizePath)(s));
+    if (f instanceof import_obsidian11.TFile) return this.app.vault.getResourcePath(f);
     return null;
   }
   async activateView() {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_HEATMAP);
-    if (existing.length > 0) {
-      await this.app.workspace.revealLeaf(existing[0]);
+    const existingLeaf = import_obsidian11.Platform.isPhone ? existing.find((leaf2) => leaf2.getRoot() === this.app.workspace.rootSplit) : existing[0];
+    if (existingLeaf) {
+      await this.app.workspace.revealLeaf(existingLeaf);
       return;
     }
-    const leaf = this.app.workspace.getRightLeaf(false);
+    const leaf = import_obsidian11.Platform.isPhone ? this.app.workspace.getLeaf("tab") : this.app.workspace.getRightLeaf(false);
     if (!leaf) {
-      new import_obsidian10.Notice("Heatmap: could not open the right sidebar.");
+      new import_obsidian11.Notice("Heatmap: could not open the activity view.");
       return;
     }
     await leaf.setViewState({ type: VIEW_TYPE_HEATMAP, active: true });

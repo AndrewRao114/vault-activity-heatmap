@@ -2,6 +2,7 @@ import {
 	App,
 	ColorComponent,
 	PluginSettingTab,
+	SecretComponent,
 	Setting,
 	TextComponent,
 } from "obsidian";
@@ -23,10 +24,10 @@ export class HeatmapSettingTab extends PluginSettingTab {
 	display() {
 		const { containerEl } = this;
 		containerEl.empty();
+		containerEl.addClass("vah-settings");
 
 		const save = async () => {
-			await this.plugin.persist();
-			this.plugin.renderAllViews();
+			this.plugin.saveSettings();
 		};
 
 		new Setting(containerEl).setName("Appearance").setHeading();
@@ -392,6 +393,27 @@ export class HeatmapSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName("AI summaries & notifications").setHeading();
 
 		new Setting(containerEl)
+			.setName("Device name")
+			.setDesc("A local label used to identify this device in synchronized timelines.")
+			.addText((text) =>
+				text
+					.setPlaceholder("Obsidian device")
+					.setValue(this.plugin.sync.deviceName)
+					.onChange((value) => this.plugin.setDeviceName(value))
+			);
+
+		new Setting(containerEl)
+			.setName("Automation device")
+			.setDesc(
+				"Only one device runs automatic summaries, preventing duplicate API requests."
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.isAutomationDevice()).onChange((value) => {
+					this.plugin.setAutomationDevice(value ? this.plugin.sync.deviceId : "");
+				})
+			);
+
+		new Setting(containerEl)
 			.setName("Provider")
 			.setDesc("Which API the weekly/monthly writing summaries are generated with.")
 			.addDropdown((dd) =>
@@ -408,18 +430,13 @@ export class HeatmapSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("API key")
 			.setDesc(
-				"Stored in this plugin's data.json inside your vault - do not share that file."
+				"Stored securely on this device. Select an existing secret or create one."
 			)
-			.addText((text) => {
-				text
-					.setPlaceholder("sk-...")
-					.setValue(this.plugin.settings.aiApiKey)
-					.onChange(async (value) => {
-						this.plugin.settings.aiApiKey = value.trim();
-						await save();
-					});
-				text.inputEl.type = "password";
-			});
+			.addComponent((el) =>
+				new SecretComponent(this.app, el)
+					.setValue(this.plugin.settings.aiSecretId)
+					.onChange((value) => this.plugin.setAiSecretId(value))
+			);
 
 		new Setting(containerEl)
 			.setName("Model")
@@ -469,6 +486,7 @@ export class HeatmapSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.aiAutoWeekly = value;
 						await save();
+						if (value) this.plugin.setAutomationDevice(this.plugin.sync.deviceId);
 					})
 			);
 
@@ -481,34 +499,32 @@ export class HeatmapSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.aiAutoMonthly = value;
 						await save();
+						if (value) this.plugin.setAutomationDevice(this.plugin.sync.deviceId);
 					})
 			);
 
 		new Setting(containerEl)
-			.setName("Desktop notification")
-			.setDesc("Show a system notification on this computer when a summary is ready.")
+			.setName("System notification")
+			.setDesc(
+				"Show a desktop notification or an in-app mobile notice when a summary is ready."
+			)
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.notifyDesktop)
-					.onChange(async (value) => {
-						this.plugin.settings.notifyDesktop = value;
-						await save();
+					.onChange((value) => {
+						this.plugin.setLocalNotificationEnabled(value);
 					})
 			);
 
 		new Setting(containerEl)
 			.setName("Phone notification webhook")
 			.setDesc(
-				"POST endpoint pinged when a summary is ready. Easiest setup: install the free ntfy app on your phone, subscribe to a private topic, and enter https://ntfy.sh/your-topic here."
+				"Securely stored POST endpoint pinged when a summary is ready, such as a private ntfy topic."
 			)
-			.addText((text) =>
-				text
-					.setPlaceholder("https://ntfy.sh/your-topic")
-					.setValue(this.plugin.settings.notifyWebhook)
-					.onChange(async (value) => {
-						this.plugin.settings.notifyWebhook = value.trim();
-						await save();
-					})
+			.addComponent((el) =>
+				new SecretComponent(this.app, el)
+					.setValue(this.plugin.settings.notifySecretId)
+					.onChange((value) => this.plugin.setNotificationSecretId(value))
 			);
 
 		new Setting(containerEl)

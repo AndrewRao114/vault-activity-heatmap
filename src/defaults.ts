@@ -1,6 +1,10 @@
 import type { HeatmapSettings } from "./types";
 
 export const VIEW_TYPE_HEATMAP = "vault-activity-heatmap";
+export const LOCAL_STATE_KEY = "vault-activity-heatmap-device-v1";
+export const LOCAL_SHARD_KEY_PREFIX = "vault-activity-heatmap-shard-v2:";
+export const DEFAULT_AI_SECRET_ID = "vault-activity-heatmap-ai-api-key";
+export const DEFAULT_NOTIFY_SECRET_ID = "vault-activity-heatmap-notification-webhook";
 
 export const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -41,7 +45,7 @@ export const DEFAULT_SETTINGS: HeatmapSettings = {
 	panelTextColor: "",
 	panelBgColor: "",
 	aiProvider: "anthropic",
-	aiApiKey: "",
+	aiSecretId: DEFAULT_AI_SECRET_ID,
 	aiModel: "",
 	aiBaseUrl: "",
 	aiSummaryFolder: "AI summaries",
@@ -50,6 +54,6 @@ export const DEFAULT_SETTINGS: HeatmapSettings = {
 	aiLastWeekly: "",
 	aiLastMonthly: "",
 	notifyDesktop: true,
-	notifyWebhook: "",
+	notifySecretId: DEFAULT_NOTIFY_SECRET_ID,
 };
 
