@@ -555,7 +555,6 @@ input.vah-task-input:focus {
 	bottom: 0;
 	z-index: 999;
 	max-height: min(76vh, 720px);
-	max-height: min(76dvh, 720px);
 	overflow-y: auto;
 	margin: 0;
 	padding: 14px max(16px, env(safe-area-inset-right))
@@ -568,6 +567,12 @@ input.vah-task-input:focus {
 	transition: transform 180ms ease, visibility 0s linear 180ms;
 	visibility: hidden;
 	pointer-events: none;
+}
+
+@supports (height: 100dvh) {
+	.vah-detail.vah-detail-sheet {
+		max-height: min(76dvh, 720px);
+	}
 }
 
 .vah-detail.vah-detail-sheet.is-open {

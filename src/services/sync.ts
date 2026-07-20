@@ -35,8 +35,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function createDeviceId(): string {
-	if (typeof globalThis.crypto?.randomUUID === "function") {
-		return globalThis.crypto.randomUUID();
+	if (typeof window.crypto?.randomUUID === "function") {
+		return window.crypto.randomUUID();
 	}
 	return `device-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }

@@ -1,0 +1,46 @@
+name: Feature request
+description: Suggest a focused improvement to Vault Activity Heatmap
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the note-taking problem first. Concrete workflows are more useful than broad feature lists.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: What are you trying to do, and what is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest behavior that would solve the problem.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Where should this work?
+      multiple: true
+      options:
+        - Desktop
+        - iPhone or iPad
+        - Android phone or tablet
+        - All platforms
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Mention workarounds, other plugins, or simpler options you tried.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized mockups or examples if they clarify the request.

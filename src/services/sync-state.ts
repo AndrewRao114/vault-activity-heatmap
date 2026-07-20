@@ -159,15 +159,15 @@ function sanitizeSharedSettings(value: unknown): SharedHeatmapSettings {
 	const candidate = isRecord(value) ? value : {};
 	const stringValue = <K extends keyof HeatmapSettings>(key: K): string =>
 		typeof candidate[key] === "string"
-			? (candidate[key] as string)
+			? candidate[key]
 			: String(DEFAULT_SETTINGS[key]);
 	const numberValue = <K extends keyof HeatmapSettings>(key: K): number =>
 		typeof candidate[key] === "number" && Number.isFinite(candidate[key])
-			? (candidate[key] as number)
+			? candidate[key]
 			: Number(DEFAULT_SETTINGS[key]);
 	const booleanValue = <K extends keyof HeatmapSettings>(key: K): boolean =>
 		typeof candidate[key] === "boolean"
-			? (candidate[key] as boolean)
+			? candidate[key]
 			: Boolean(DEFAULT_SETTINGS[key]);
 	const colorValue = (key: "baseColor" | "emptyColor" | "panelTextColor" | "panelBgColor") => {
 		const value = stringValue(key).trim();
@@ -388,11 +388,9 @@ export function migratePersistedData(
 
 	const legacy = (isRecord(raw) ? raw : {}) as LegacyPersistedData;
 	const legacySettings = isRecord(legacy.settings) ? legacy.settings : {};
-	const {
-		aiApiKey: _legacyAiKey,
-		notifyWebhook: _legacyWebhook,
-		...legacyWithoutSecrets
-	} = legacySettings;
+	const legacyWithoutSecrets: Record<string, unknown> = { ...legacySettings };
+	delete legacyWithoutSecrets.aiApiKey;
+	delete legacyWithoutSecrets.notifyWebhook;
 	const legacyLocal: LocalDeviceState = {
 		deviceId,
 		deviceName,

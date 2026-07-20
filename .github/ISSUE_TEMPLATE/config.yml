@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/AndrewRao114/vault-activity-heatmap/security/advisories/new
+    about: Report security issues privately. Do not post secrets or private vault content in a public issue.

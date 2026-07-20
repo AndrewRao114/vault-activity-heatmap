@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.1
+
+- Resolve the remaining actionable Obsidian automated review findings.
+- Refresh the README for the stable cross-device release and add direct install,
+  build, star, and download links.
+- Add structured bug and feature request forms with privacy safeguards.
+- Add weekly dependency update checks for npm and GitHub Actions.
+
+## 1.4.0
+
+- Promote conflict-safe cross-device dashboard synchronization and the mobile
+  interface from beta to the stable release channel.
+
 ## 1.4.0-beta.1
 
 - Add conflict-safe cross-device dashboard synchronization through the user's
