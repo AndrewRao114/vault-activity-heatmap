@@ -1,0 +1,72 @@
+name: Bug report
+description: Report behavior that is broken, confusing, or inconsistent
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Vault Activity Heatmap. Remove private note content, API keys, webhook URLs, and personal file paths from screenshots and logs.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the behavior and what you expected instead.
+      placeholder: The heatmap showed... I expected...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the shortest sequence that reproduces the problem.
+      placeholder: |
+        1. Open...
+        2. Select...
+        3. Observe...
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: 1.4.0
+    validations:
+      required: true
+  - type: input
+    id: obsidian-version
+    attributes:
+      label: Obsidian version
+      placeholder: 1.13.1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - iOS or iPadOS
+        - Android
+    validations:
+      required: true
+  - type: textarea
+    id: sync
+    attributes:
+      label: Sync context
+      description: If relevant, name the sync provider, source/destination device roles, whether Obsidian was foregrounded, and approximate edit/arrival times.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized screenshots, console errors, or other details that help reproduce the issue.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed private note content, secrets, webhook URLs, and personal file paths.
+          required: true

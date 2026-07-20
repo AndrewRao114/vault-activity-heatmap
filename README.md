@@ -1,15 +1,26 @@
+<div align="center">
+
 # Vault Activity Heatmap
 
-<p align="center">
-  <img src="assets/screenshots/heatmap-day-detail.png" alt="Vault Activity Heatmap day detail panel" width="820">
+Turn your Obsidian writing history into a focused, cross-device contribution dashboard.
+
+<p>
+  <a href="obsidian://show-plugin?id=vault-activity-heatmap"><img src="https://img.shields.io/badge/Install_in_Obsidian-7C3AED?style=for-the-badge&logo=obsidian&logoColor=white" alt="Install Vault Activity Heatmap in Obsidian"></a>
 </p>
 
-<p align="center">
-  <a href="https://obsidian.md"><img src="https://img.shields.io/badge/Obsidian-plugin-7C3AED?logo=obsidian&logoColor=white" alt="Obsidian plugin"></a>
+<p>
+  <a href="https://github.com/AndrewRao114/vault-activity-heatmap/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/AndrewRao114/vault-activity-heatmap/ci.yml?branch=master&label=build" alt="Build status"></a>
   <a href="https://github.com/AndrewRao114/vault-activity-heatmap/releases"><img src="https://img.shields.io/github/v/release/AndrewRao114/vault-activity-heatmap?label=release" alt="Latest release"></a>
   <a href="https://github.com/AndrewRao114/vault-activity-heatmap/releases"><img src="https://img.shields.io/github/downloads/AndrewRao114/vault-activity-heatmap/total?label=downloads" alt="Downloads"></a>
+  <a href="https://github.com/AndrewRao114/vault-activity-heatmap/stargazers"><img src="https://img.shields.io/github/stars/AndrewRao114/vault-activity-heatmap?style=flat&label=stars" alt="GitHub stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
+
+<p><strong>Desktop</strong> &middot; <strong>iOS</strong> &middot; <strong>Android</strong></p>
+
+<img src="assets/screenshots/heatmap-day-detail.png" alt="Vault Activity Heatmap day detail panel" width="920">
+
+</div>
 
 A GitHub-style contribution graph for your Obsidian vault, with daily tasks,
 edit timelines, AI weekly/monthly summaries, notifications, and panel-only
@@ -29,6 +40,7 @@ planned, and what still needs attention.
 - [Settings](#settings)
 - [Privacy and risk](#privacy-and-risk)
 - [Installation](#installation)
+- [Support and contributing](#support-and-contributing)
 - [Development](#development)
 - [Roadmap](#roadmap)
 
@@ -72,8 +84,9 @@ planned, and what still needs attention.
 
 ## Mobile and sync
 
-> Mobile synchronization is in beta for `1.4.0-beta.1`. Back up the vault and
-> upgrade every connected device together before testing.
+Cross-device dashboard synchronization is available in `1.4.0`. Back up the
+vault before the first multi-device migration and keep every connected device
+on the same plugin version.
 
 | Platform | Interface | Support |
 | --- | --- | --- |
@@ -168,7 +181,8 @@ Ways to keep your risk lower:
 
 ### From Obsidian Community Plugins
 
- Install it from:
+Use the [direct install link](obsidian://show-plugin?id=vault-activity-heatmap),
+or install it from:
 
 `Settings -> Community plugins -> Browse -> Vault Activity Heatmap`
 
@@ -185,6 +199,13 @@ Ways to keep your risk lower:
 4. Enable **Vault Activity Heatmap**.
 5. Run **Backfill history from existing file dates** if you want existing notes
    to appear immediately.
+
+## Support and contributing
+
+- [Report a bug](https://github.com/AndrewRao114/vault-activity-heatmap/issues/new?template=bug_report.yml)
+- [Request a feature](https://github.com/AndrewRao114/vault-activity-heatmap/issues/new?template=feature_request.yml)
+- [Read the contributing guide](CONTRIBUTING.md)
+- [Report a security issue privately](https://github.com/AndrewRao114/vault-activity-heatmap/security/advisories/new)
 
 ## Development
 

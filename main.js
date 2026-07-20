@@ -1119,11 +1119,9 @@ function migratePersistedData(raw, deviceId, deviceName, selectedDay, now) {
   }
   const legacy = isRecord2(raw) ? raw : {};
   const legacySettings = isRecord2(legacy.settings) ? legacy.settings : {};
-  const {
-    aiApiKey: _legacyAiKey,
-    notifyWebhook: _legacyWebhook,
-    ...legacyWithoutSecrets
-  } = legacySettings;
+  const legacyWithoutSecrets = { ...legacySettings };
+  delete legacyWithoutSecrets.aiApiKey;
+  delete legacyWithoutSecrets.notifyWebhook;
   const legacyLocal = {
     deviceId,
     deviceName,
@@ -1324,8 +1322,8 @@ function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function createDeviceId() {
-  if (typeof globalThis.crypto?.randomUUID === "function") {
-    return globalThis.crypto.randomUUID();
+  if (typeof window.crypto?.randomUUID === "function") {
+    return window.crypto.randomUUID();
   }
   return `device-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }

@@ -1,6 +1,6 @@
 {
 	"name": "vault-activity-heatmap",
-	"version": "1.4.0",
+	"version": "1.4.1",
 	"description": "GitHub-style contribution heatmap of daily note-taking activity for Obsidian",
 	"main": "main.js",
 	"scripts": {
