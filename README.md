@@ -209,8 +209,10 @@ or install it from:
 
 ## Development
 
+Use Node.js 22 and npm, matching the validation workflow. From a clean checkout:
+
 ```bash
-npm install
+npm ci
 npm run dev
 npm run test
 npm run build
