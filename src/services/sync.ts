@@ -372,7 +372,7 @@ export class SyncService {
 		}
 	}
 
-	async flush(): Promise<void> {
+	async flush(throwOnError = false): Promise<void> {
 		if (!this.state) return;
 		this.clearTimers();
 		this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
@@ -402,6 +402,7 @@ export class SyncService {
 		} catch (error) {
 			console.error("vault-activity-heatmap: failed to persist synchronized state", error);
 			if (!this.stopping) this.schedulePersist();
+			if (throwOnError) throw error;
 		}
 	}
 

@@ -10,6 +10,7 @@ import {
 import { DEFAULT_SETTINGS, VIEW_TYPE_HEATMAP } from "./defaults";
 import { ActivityService } from "./services/activity";
 import { AiSummaryService } from "./services/ai-summary";
+import { DailyNoteMigrationService } from "./services/daily-note-migration";
 import { DailyNotesService } from "./services/daily-notes";
 import { NotificationService } from "./services/notifications";
 import { SyncService } from "./services/sync";
@@ -17,6 +18,7 @@ import { VaultSyncTransport } from "./services/sync-transport";
 import type { ActivityData, DailyTask, HeatmapSettings } from "./types";
 import { startOfToday, toDateKey, weekStartOf } from "./utils/date";
 import { AddTaskModal } from "./ui/add-task-modal";
+import { DailyNoteMigrationModal } from "./ui/daily-note-migration-modal";
 import { HeatmapView } from "./ui/heatmap-view";
 import { HeatmapSettingTab } from "./ui/settings-tab";
 
@@ -30,6 +32,7 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 	sync = new SyncService(this, new VaultSyncTransport(this));
 	activityService = new ActivityService(this);
 	dailyNotes = new DailyNotesService(this);
+	dailyNoteMigration = new DailyNoteMigrationService(this);
 	aiSummary = new AiSummaryService(this);
 	notifications = new NotificationService(this);
 
@@ -56,12 +59,18 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 
 		this.addCommand({
 			id: "add-task-today",
-			name: "Add task to today's daily reflection",
+			name: "Add task to today's daily note",
 			callback: () => {
 				new AddTaskModal(this.app, toDateKey(new Date()), (text) => {
 					void this.addTaskToDailyReflection(toDateKey(new Date()), text);
 				}).open();
 			},
+		});
+
+		this.addCommand({
+			id: "migrate-legacy-daily-notes",
+			name: "Migrate legacy reflection notes to Daily Notes",
+			callback: () => new DailyNoteMigrationModal(this).open(),
 		});
 
 		this.addCommand({
@@ -132,10 +141,10 @@ export default class VaultActivityHeatmapPlugin extends Plugin {
 	}
 
 	async persist() {
-		await this.sync.flush();
+		await this.sync.flush(true);
 	}
 
-	saveSettings() {
+	saveSettings(): void {
 		this.sync.updateSharedSettings(this.settings);
 	}
 
