@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.5.0
+
+- Integrate daily tasks with the official Daily Notes core plugin through an
+  explicit, review-safe configuration import and public Vault APIs.
+- Add cross-device configuration checks that block writes when a device's Daily
+  Notes folder, format, or template differs from the shared binding.
+- Add a copy-first migration assistant for legacy reflection notes, including a
+  complete preview, collision and stale-write detection, SHA-256 idempotency,
+  relative-link rewriting, exact backups, and a checkpointed human-readable
+  manifest.
+- Discover strictly dated notes inside older nested legacy folders, while
+  blocking ambiguous names and duplicate date destinations for manual review.
+- Add one-action Daily Notes connection, device-local configuration status,
+  conflict-safe frontmatter handling, and an advisory cross-device migration
+  lease.
+- Keep conflict/recovery copies visible as blocked migration items and
+  reconcile links in verified imports when a later retry unlocks linked notes.
+- Avoid recovery-folder collisions when two migration attempts start within
+  the same millisecond.
+- Report a failed shared-settings write instead of claiming Daily Notes was
+  connected, and restore the previous provider when activation cannot persist.
+- Preserve existing installations on the custom reflection-folder provider
+  while asking new installations to choose a provider explicitly.
+- Limit the integrated task panel to the configured task heading so unrelated
+  checkboxes in a Daily Note are not treated as Heatmap tasks.
+
 ## 1.4.1
 
 - Resolve the remaining actionable Obsidian automated review findings.

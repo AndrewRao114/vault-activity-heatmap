@@ -30,6 +30,10 @@ export interface ActivityData {
 }
 
 export type Metric = "files" | "edits";
+export type TaskNoteSource =
+	| "unconfigured"
+	| "obsidian-daily-notes"
+	| "custom";
 
 export interface HeatmapSettings {
 	baseColor: string;
@@ -45,9 +49,19 @@ export interface HeatmapSettings {
 	firstDayOfWeek: number;
 	/** Last folder filter chosen in the view; stored only on this device. */
 	lastFolderFilter: string;
-	/** Folder where daily reflection notes live. */
+	/** Provider used for task-backed daily notes. */
+	taskNoteSource: TaskNoteSource;
+	/** Imported folder from the official Daily Notes core plugin. */
+	coreDailyNotesFolder: string;
+	/** Imported Moment.js path format from the official Daily Notes core plugin. */
+	coreDailyNotesFormat: string;
+	/** Imported template path from the official Daily Notes core plugin. */
+	coreDailyNotesTemplate: string;
+	/** True after a Daily Notes binding was explicitly imported. */
+	coreDailyNotesImported: boolean;
+	/** Folder where legacy/custom daily reflection notes live. */
 	reflectionFolder: string;
-	/** Moment.js format for reflection note file names. */
+	/** Moment.js format for legacy/custom reflection note file names. */
 	dailyNoteFormat: string;
 	/** Heading that tasks are appended under; empty = end of note. */
 	taskHeading: string;
@@ -163,7 +177,7 @@ export interface LegacySecrets {
 	notifyWebhook: string;
 }
 
-/** A checkbox task parsed out of a daily reflection note. */
+/** A checkbox task parsed out of a task-backed daily note. */
 export interface DailyTask {
 	/** zero-based line number in the note */
 	line: number;
