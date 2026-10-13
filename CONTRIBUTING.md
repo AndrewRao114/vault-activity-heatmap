@@ -50,6 +50,7 @@ Before opening a pull request:
 - Preserve existing settings and data compatibility unless the change clearly
   requires a migration.
 - Run `npm run typecheck`.
+- Run `npm test`.
 - Run `npm run build`.
 - Avoid adding network requests unless the feature is opt-in and documented.
 - Avoid storing full note contents in plugin data.
