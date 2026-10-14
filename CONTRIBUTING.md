@@ -51,6 +51,7 @@ Before opening a pull request:
   requires a migration.
 - Run `npm run typecheck`.
 - Run `npm test`.
+- Run `npm audit --audit-level=moderate`.
 - Run `npm run build`.
 - Avoid adding network requests unless the feature is opt-in and documented.
 - Avoid storing full note contents in plugin data.
