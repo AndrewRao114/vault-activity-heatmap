@@ -53,6 +53,7 @@ Before opening a pull request:
 - Run `npm test`.
 - Run `npm audit --audit-level=moderate`.
 - Run `npm run build`.
+- Verify the committed bundle with `git diff --exit-code -- main.js`.
 - Avoid adding network requests unless the feature is opt-in and documented.
 - Avoid storing full note contents in plugin data.
 
