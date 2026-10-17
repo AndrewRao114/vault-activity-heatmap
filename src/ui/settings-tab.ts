@@ -1,6 +1,7 @@
 import {
 	App,
 	ColorComponent,
+	Notice,
 	PluginSettingTab,
 	SecretComponent,
 	Setting,
@@ -8,10 +9,11 @@ import {
 } from "obsidian";
 
 import type VaultActivityHeatmapPlugin from "../main";
-import type { Metric } from "../types";
+import type { Metric, TaskNoteSource } from "../types";
 import { hexToRgbString, parseColorInput } from "../utils/color";
 import { momentFn, startOfToday, toDateKey } from "../utils/date";
 import { ConfirmClearHistoryModal } from "./confirm-clear-history-modal";
+import { DailyNoteMigrationModal } from "./daily-note-migration-modal";
 
 export class HeatmapSettingTab extends PluginSettingTab {
 	private plugin: VaultActivityHeatmapPlugin;
@@ -27,7 +29,7 @@ export class HeatmapSettingTab extends PluginSettingTab {
 		containerEl.addClass("vah-settings");
 
 		const save = async () => {
-			this.plugin.saveSettings();
+			await this.plugin.saveSettings();
 		};
 
 		new Setting(containerEl).setName("Appearance").setHeading();
@@ -280,39 +282,197 @@ export class HeatmapSettingTab extends PluginSettingTab {
 					})
 			);
 
-		new Setting(containerEl).setName("Daily reflection notes").setHeading();
+		new Setting(containerEl).setName("Task notes").setHeading();
+
+		if (this.plugin.settings.taskNoteSource !== "obsidian-daily-notes") {
+			new Setting(containerEl)
+				.setName("Connect Daily Notes")
+				.setDesc(
+					"Import this device's core Daily Notes binding, switch task storage to it, and open a read-only migration preview."
+				)
+				.addButton((button) =>
+					button
+						.setButtonText("Connect and review")
+						.setCta()
+						.onClick(async () => {
+							try {
+								const binding =
+									await this.plugin.dailyNotes.importCoreDailyNotesSettings();
+								new Notice(
+									`Heatmap: connected to ${binding.folder || "the vault root"}.`
+								);
+								this.display();
+								new DailyNoteMigrationModal(this.plugin).open();
+							} catch (error) {
+								const message =
+									error instanceof Error ? error.message : String(error);
+								new Notice(`Heatmap: ${message}`);
+							}
+						})
+				);
+		}
 
 		new Setting(containerEl)
-			.setName("Reflection folder")
+			.setName("Store daily tasks in")
 			.setDesc(
-				"Folder where daily reflection notes are created when you right-click a square. Leave blank for the vault root."
+				"Use the same notes as Obsidian's Daily Notes core plugin, or keep the legacy custom reflection folder."
 			)
-			.addText((text) =>
-				text
-					.setPlaceholder("Daily reflection")
-					.setValue(this.plugin.settings.reflectionFolder)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("unconfigured", "Choose a provider")
+					.addOption(
+						"obsidian-daily-notes",
+						"Obsidian Daily Notes (recommended)"
+					)
+					.addOption("custom", "Custom reflection folder")
+					.setValue(this.plugin.settings.taskNoteSource)
 					.onChange(async (value) => {
-						this.plugin.settings.reflectionFolder = value;
+						this.plugin.settings.taskNoteSource = value as TaskNoteSource;
 						await save();
+						this.display();
 					})
 			);
 
-		new Setting(containerEl)
-			.setName("Note name format")
-			.setDesc(
-				`Date format for the note file name (moment.js syntax). "YYYY-MM-DD" -> ${momentFn().format(
-					"YYYY-MM-DD"
-				)}.md`
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("YYYY-MM-DD")
-					.setValue(this.plugin.settings.dailyNoteFormat)
-					.onChange(async (value) => {
-						this.plugin.settings.dailyNoteFormat = value;
-						await save();
+		if (this.plugin.settings.taskNoteSource === "obsidian-daily-notes") {
+			let target = "Not imported yet";
+			if (this.plugin.settings.coreDailyNotesImported) {
+				try {
+					target = this.plugin.dailyNotePath(toDateKey(new Date()));
+				} catch {
+					target = "Invalid imported path format";
+				}
+			}
+			const bindingSetting = new Setting(containerEl)
+				.setName("Daily Notes binding")
+				.setDesc(
+					`Current target: ${target}. Import reads the core plugin's folder, format, and template from this device, then stores a stable shared binding.`
+				)
+				.addButton((button) =>
+					button
+						.setButtonText(
+							this.plugin.settings.coreDailyNotesImported
+								? "Import again"
+								: "Import settings"
+						)
+						.onClick(async () => {
+							try {
+								const binding =
+									await this.plugin.dailyNotes.importCoreDailyNotesSettings();
+								new Notice(
+									`Heatmap: Daily Notes now targets ${binding.folder || "the vault root"}.`
+								);
+								this.display();
+							} catch (error) {
+								const message =
+									error instanceof Error ? error.message : String(error);
+								new Notice(`Heatmap: ${message}`);
+							}
+						})
+				)
+				.addButton((button) =>
+					button.setButtonText("Check this device").onClick(async () => {
+						try {
+							const result =
+								await this.plugin.dailyNotes.checkCoreDailyNotesSettings();
+							new Notice(`Heatmap: ${result.message}`);
+						} catch (error) {
+							const message =
+								error instanceof Error ? error.message : String(error);
+							new Notice(`Heatmap: ${message}`);
+						}
 					})
-			);
+				);
+			void this.plugin.dailyNotes
+				.checkCoreDailyNotesSettings()
+				.then((result) => {
+					if (!bindingSetting.settingEl.isConnected) return;
+					bindingSetting.setDesc(
+						`Current target: ${target}. This device: ${result.message}`
+					);
+				})
+				.catch((error: unknown) => {
+					if (!bindingSetting.settingEl.isConnected) return;
+					const message = error instanceof Error ? error.message : String(error);
+					bindingSetting.setDesc(
+						`Current target: ${target}. This device is not verified: ${message}`
+					);
+				});
+
+			new Setting(containerEl)
+				.setName("Legacy reflection folder")
+				.setDesc(
+					"Former custom folder used only as the migration source. It is never used as the Daily Notes destination."
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("Daily reflection")
+						.setValue(this.plugin.settings.reflectionFolder)
+						.onChange(async (value) => {
+							this.plugin.settings.reflectionFolder = value;
+							await save();
+						})
+				);
+
+			new Setting(containerEl)
+				.setName("Legacy note format")
+				.setDesc(
+					"Former Moment.js path format used to match migration source notes. It must include year, month, and day."
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("YYYY-MM-DD")
+						.setValue(this.plugin.settings.dailyNoteFormat)
+						.onChange(async (value) => {
+							this.plugin.settings.dailyNoteFormat = value;
+							await save();
+						})
+				);
+
+			new Setting(containerEl)
+				.setName("Legacy note migration")
+				.setDesc(
+					"Preview and copy every dated Markdown note from the legacy reflection folder into Daily Notes. Originals are never deleted."
+				)
+				.addButton((button) =>
+					button
+						.setButtonText("Review migration")
+						.onClick(() => new DailyNoteMigrationModal(this.plugin).open())
+				);
+		}
+
+		if (this.plugin.settings.taskNoteSource === "custom") {
+			new Setting(containerEl)
+				.setName("Reflection folder")
+				.setDesc(
+					"Legacy folder where custom daily reflection notes are created. Leave blank for the vault root."
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("Daily reflection")
+						.setValue(this.plugin.settings.reflectionFolder)
+						.onChange(async (value) => {
+							this.plugin.settings.reflectionFolder = value;
+							await save();
+						})
+				);
+
+			new Setting(containerEl)
+				.setName("Note name format")
+				.setDesc(
+					`Date format for custom note paths (Moment.js syntax). "YYYY-MM-DD" -> ${momentFn().format(
+						"YYYY-MM-DD"
+					)}.md`
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("YYYY-MM-DD")
+						.setValue(this.plugin.settings.dailyNoteFormat)
+						.onChange(async (value) => {
+							this.plugin.settings.dailyNoteFormat = value;
+							await save();
+						})
+				);
+		}
 
 		new Setting(containerEl)
 			.setName("Tasks heading")
@@ -334,7 +494,7 @@ export class HeatmapSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Show tasks")
 			.setDesc(
-				"To Do-style task list for the selected day, backed by its daily reflection note."
+				"To Do-style task list for the selected day, backed by its configured daily note."
 			)
 			.addToggle((toggle) =>
 				toggle

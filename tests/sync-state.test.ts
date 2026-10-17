@@ -56,6 +56,38 @@ function addEdit(
 }
 
 describe("v1 migration", () => {
+	it("starts new installations unconfigured but preserves old installs as custom", () => {
+		const fresh = migratePersistedData(
+			null,
+			"device-a",
+			"Desktop",
+			"2026-07-24",
+			1000
+		);
+		expect(fresh.state.settings.value.taskNoteSource).toBe("unconfigured");
+
+		const oldState = createInitialState(
+			{ ...DEFAULT_SETTINGS, taskNoteSource: "custom" },
+			"device-a",
+			"Desktop",
+			"2026-07-24",
+			1000
+		);
+		const oldSettings = oldState.settings.value as unknown as Record<
+			string,
+			unknown
+		>;
+		delete oldSettings.taskNoteSource;
+		const migrated = migratePersistedData(
+			oldState,
+			"device-a",
+			"Desktop",
+			"2026-07-24",
+			1000
+		);
+		expect(migrated.state.settings.value.taskNoteSource).toBe("custom");
+	});
+
 	it("preserves activity and moves secrets out of synchronized state", () => {
 		const result = migratePersistedData(
 			{

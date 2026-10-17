@@ -444,7 +444,7 @@ export class HeatmapView extends ItemView {
 		const menu = new Menu();
 		menu.addItem((item) =>
 			item
-				.setTitle("Add task to daily reflection...")
+				.setTitle("Add task to daily note...")
 				.setIcon("check-square")
 				.onClick(() => {
 					new AddTaskModal(this.plugin.app, dateKey, (text) => {
@@ -454,14 +454,14 @@ export class HeatmapView extends ItemView {
 		);
 		menu.addItem((item) =>
 			item
-				.setTitle("Open daily reflection note")
+				.setTitle("Open daily note")
 				.setIcon("file-text")
 				.onClick(() => void this.plugin.openDailyReflection(dateKey))
 		);
 		return menu;
 	}
 
-	/** Right-click and long-press menu for reflection actions. */
+	/** Right-click and long-press menu for daily-note actions. */
 	private attachCellMenu(cell: HTMLElement, dateKey: string) {
 		let suppressContextMenuUntil = 0;
 		cell.addEventListener("contextmenu", (e) => {
@@ -575,10 +575,10 @@ export class HeatmapView extends ItemView {
 			});
 			const openNote = actions.createEl("button", {
 				cls: "clickable-icon",
-				attr: { type: "button", "aria-label": "Open daily reflection note" },
+				attr: { type: "button", "aria-label": "Open daily note" },
 			});
 			setIcon(openNote, "file-text");
-			openNote.setAttr("title", "Open daily reflection note");
+			openNote.setAttr("title", "Open daily note");
 			openNote.addEventListener("click", () => void this.plugin.openDailyReflection(key));
 			const close = actions.createEl("button", {
 				cls: "clickable-icon",
@@ -659,7 +659,7 @@ export class HeatmapView extends ItemView {
 		}
 	}
 
-	/** Microsoft To Do-style task list backed by the day's reflection note. */
+	/** Microsoft To Do-style task list backed by the configured daily note. */
 	private renderTasks(
 		detail: HTMLElement,
 		key: string,
@@ -723,8 +723,8 @@ export class HeatmapView extends ItemView {
 			section.createDiv({
 				cls: "vah-detail-empty",
 				text: daily.file
-					? "No tasks in this day's reflection note."
-					: "No reflection note yet - add a task to create one.",
+						? "No tasks in this day's task section."
+						: "No daily note yet - add a task to create one.",
 			});
 		}
 

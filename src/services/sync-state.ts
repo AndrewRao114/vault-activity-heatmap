@@ -76,6 +76,11 @@ export function sharedSettingsFrom(settings: HeatmapSettings): SharedHeatmapSett
 		weeksToShow: settings.weeksToShow,
 		excludeFolders: [...settings.excludeFolders],
 		firstDayOfWeek: settings.firstDayOfWeek,
+		taskNoteSource: settings.taskNoteSource,
+		coreDailyNotesFolder: settings.coreDailyNotesFolder,
+		coreDailyNotesFormat: settings.coreDailyNotesFormat,
+		coreDailyNotesTemplate: settings.coreDailyNotesTemplate,
+		coreDailyNotesImported: settings.coreDailyNotesImported,
 		reflectionFolder: settings.reflectionFolder,
 		dailyNoteFormat: settings.dailyNoteFormat,
 		taskHeading: settings.taskHeading,
@@ -155,7 +160,10 @@ export function createInitialState(
 	};
 }
 
-function sanitizeSharedSettings(value: unknown): SharedHeatmapSettings {
+function sanitizeSharedSettings(
+	value: unknown,
+	missingTaskNoteSource: HeatmapSettings["taskNoteSource"] = "custom"
+): SharedHeatmapSettings {
 	const candidate = isRecord(value) ? value : {};
 	const stringValue = <K extends keyof HeatmapSettings>(key: K): string =>
 		typeof candidate[key] === "string"
@@ -198,6 +206,16 @@ function sanitizeSharedSettings(value: unknown): SharedHeatmapSettings {
 			? candidate.excludeFolders.filter((item): item is string => typeof item === "string")
 			: [...DEFAULT_SETTINGS.excludeFolders],
 		firstDayOfWeek: numberValue("firstDayOfWeek") === 0 ? 0 : 1,
+		taskNoteSource:
+			candidate.taskNoteSource === "obsidian-daily-notes" ||
+			candidate.taskNoteSource === "custom" ||
+			candidate.taskNoteSource === "unconfigured"
+				? candidate.taskNoteSource
+				: missingTaskNoteSource,
+		coreDailyNotesFolder: stringValue("coreDailyNotesFolder"),
+		coreDailyNotesFormat: stringValue("coreDailyNotesFormat"),
+		coreDailyNotesTemplate: stringValue("coreDailyNotesTemplate"),
+		coreDailyNotesImported: booleanValue("coreDailyNotesImported"),
 		reflectionFolder: stringValue("reflectionFolder"),
 		dailyNoteFormat: stringValue("dailyNoteFormat"),
 		taskHeading: stringValue("taskHeading"),
@@ -377,6 +395,14 @@ export function migratePersistedData(
 	now: number
 ): MigrationResult {
 	const fallback = createInitialState(DEFAULT_SETTINGS, deviceId, deviceName, selectedDay, now);
+	if (raw === null || raw === undefined) {
+		return {
+			state: fallback,
+			legacySecrets: { aiApiKey: "", notifyWebhook: "" },
+			legacyLocal: {},
+			migrated: false,
+		};
+	}
 	if (isRecord(raw) && raw.schemaVersion === 2) {
 		return {
 			state: sanitizeV2(raw, fallback),

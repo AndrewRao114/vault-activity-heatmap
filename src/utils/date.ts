@@ -4,8 +4,9 @@ import { moment } from "obsidian";
 // type without call signatures, so give it a minimal callable shape here.
 export const momentFn = moment as unknown as (
 	input?: string | Date,
-	format?: string
-) => { format(fmt: string): string };
+	format?: string,
+	strict?: boolean
+) => { format(fmt: string): string; isValid(): boolean };
 
 /** Local-timezone YYYY-MM-DD key for a date. */
 export function toDateKey(d: Date): string {

@@ -639,3 +639,51 @@ input.vah-task-input:focus {
 		transition: none;
 	}
 }
+
+.vah-migration-list {
+	max-height: min(48vh, 520px);
+	overflow-y: auto;
+	border-block: 1px solid var(--background-modifier-border);
+}
+
+.vah-migration-row {
+	display: grid;
+	grid-template-columns: minmax(110px, auto) minmax(0, 1fr);
+	gap: 4px 12px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--background-modifier-border);
+	overflow-wrap: anywhere;
+}
+
+.vah-migration-status {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	text-transform: uppercase;
+}
+
+.vah-migration-status-create,
+.vah-migration-status-identical,
+.vah-migration-status-already-imported {
+	color: var(--text-success);
+}
+
+.vah-migration-status-merge,
+.vah-migration-status-changed-after-import,
+.vah-migration-status-blocked {
+	color: var(--text-warning);
+}
+
+.vah-migration-row .setting-item-description {
+	grid-column: 2;
+}
+
+@media (max-width: 600px) {
+	.vah-migration-row {
+		grid-template-columns: 1fr;
+	}
+
+	.vah-migration-row .setting-item-description {
+		grid-column: 1;
+	}
+}

@@ -53,7 +53,8 @@ planned, and what still needs attention.
 | Markdown activity tracking | Records created/edited notes through Obsidian's vault APIs and supports rename/move events. |
 | Day detail panel | Click a square to see tasks, notes edited, and a timestamped edit timeline. |
 | Clean note labels | Shows short file names by default, with a one-click "Show paths" toggle when full paths matter. |
-| Daily reflection tasks | Add and complete Microsoft To Do-style tasks while keeping markdown checkboxes as the source of truth. |
+| Daily Notes tasks | Add and complete Microsoft To Do-style tasks inside the same notes created by Obsidian's official Daily Notes core plugin. |
+| Legacy-note migration | Preview and copy dated reflection notes into Daily Notes with collision checks, backups, and no automatic deletion. |
 | Edit sessions | Groups rapid saves into short sessions such as `14:31-14:45 | +240 B | 6 saves`. |
 | AI summaries | Optional weekly/monthly summaries using your own Anthropic or OpenAI-compatible API key. |
 | Notifications | Optional desktop notifications and phone/webhook pings through ntfy or compatible endpoints. |
@@ -78,9 +79,14 @@ planned, and what still needs attention.
 
 1. Open the heatmap from the ribbon calendar icon, or run `Open activity heatmap`.
 2. Click a day square to inspect notes, tasks, and edit sessions.
-3. Right-click a day square, or long-press it on mobile, to add a reflection task.
-4. Run `Backfill history from existing file dates` if you want existing notes to appear immediately.
-5. Optional: configure AI summaries and notifications in the plugin settings.
+3. In plugin settings, choose **Connect and review** to import this device's
+   core Daily Notes binding and open the read-only migration preview.
+4. Right-click a day square, or long-press it on mobile, to add a task to that
+   day's Daily Note.
+5. If you previously used the separate reflection folder, choose **Review
+   migration** before removing or archiving anything.
+6. Run `Backfill history from existing file dates` if you want existing notes to appear immediately.
+7. Optional: configure AI summaries and notifications in the plugin settings.
 
 ## Mobile and sync
 
@@ -116,12 +122,21 @@ limitations, and troubleshooting.
 - Exclude folders like templates, archives, or attachments.
 - Choose the number of weeks shown and the week start day.
 
-### Daily reflection tasks
+### Daily Notes tasks
 
-- Configure the reflection folder.
-- Configure the filename date format, such as `YYYY-MM-DD`.
+- Use **Connect and review** to import the Daily Notes core plugin's folder,
+  filename format, and template before previewing any legacy-note changes.
+- Check each device for configuration mismatches before writing tasks.
 - Configure the heading where tasks are inserted.
 - Toggle task and timeline sections in the detail panel.
+- Preview and copy legacy notes with the built-in migration assistant.
+
+Obsidian does not currently expose a public arbitrary-date Daily Notes API.
+Vault Activity Heatmap therefore imports the core plugin's on-disk configuration
+only after an explicit action and performs runtime note operations through
+public Vault APIs. It does not access `internalPlugins`, global `app`, or another
+plugin's private instance. See
+[Daily Notes integration and migration](docs/daily-notes-integration.md).
 
 ### AI summaries
 
@@ -161,8 +176,8 @@ only happens when you enable features that need it.
 | --- | --- |
 | Local storage | Mergeable metadata is stored in plugin `data.json`; device preferences and that device's recovery shard stay in vault-scoped local storage. |
 | Vault enumeration | The plugin can enumerate vault files for heatmap counts, folder filters, and backfill. |
-| Vault reads | The plugin reads note content only for daily task parsing and optional AI summary excerpts. |
-| Vault writes | The plugin writes daily reflection tasks and generated summary notes through Obsidian's vault APIs. |
+| Vault reads | The plugin reads note content for daily task parsing, migration previews/backups, and optional AI summary excerpts. |
+| Vault writes | The plugin writes tasks, copy-first migration results, and generated summary notes through Obsidian's vault APIs. |
 | Network requests | Normal heatmap tracking is local. Remote backdrop URLs, AI summaries, and webhook/phone notifications are opt-in network features. |
 | API keys | API keys, webhook URLs, and each device's secret selections use device-local Obsidian storage and are omitted from `data.json`. |
 | Synced metadata | If plugin configuration sync is enabled, the provider receives note paths, timestamps, counts, sessions, and device identifiers. |
