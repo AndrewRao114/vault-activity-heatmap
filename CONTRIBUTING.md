@@ -31,7 +31,7 @@ Privacy-sensitive features should stay opt-in.
 ## Development setup
 
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm run build
 ```
