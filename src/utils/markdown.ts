@@ -63,16 +63,23 @@ export function insertUnderHeading(
 	}
 	const headingText = normalizeHeadingText(h.replace(/^#+\s*/, ""));
 	const headingLine = h.startsWith("#") ? h : "## " + h;
+	const configuredLevel = h.match(/^(#{1,6})\s+/)?.[1]?.length ?? 2;
 
 	const lines = content.split("\n");
 	const skip = nonHeadingLines(lines);
 	let idx = -1;
+	let headingLevel = 6;
 	for (let i = 0; i < lines.length; i++) {
 		if (skip[i]) continue;
-		const m = lines[i]?.match(/^#{1,6}\s+(.*)$/);
-		const text = m?.[1];
-		if (text !== undefined && normalizeHeadingText(text) === headingText) {
+		const m = lines[i]?.match(/^(#{1,6})\s+(.*)$/);
+		const text = m?.[2];
+		if (
+			text !== undefined &&
+			m?.[1]?.length === configuredLevel &&
+			normalizeHeadingText(text) === headingText
+		) {
 			idx = i;
+			headingLevel = m?.[1]?.length ?? 6;
 			break;
 		}
 	}
@@ -84,7 +91,8 @@ export function insertUnderHeading(
 	let end = lines.length;
 	for (let i = idx + 1; i < lines.length; i++) {
 		if (skip[i]) continue;
-		if (/^#{1,6}\s/.test(lines[i] ?? "")) {
+		const nextHeading = lines[i]?.match(/^(#{1,6})\s/);
+		if (nextHeading?.[1] && nextHeading[1].length <= headingLevel) {
 			end = i;
 			break;
 		}
@@ -94,5 +102,50 @@ export function insertUnderHeading(
 	while (insertAt > idx + 1 && (lines[insertAt - 1] ?? "").trim() === "") insertAt--;
 	lines.splice(insertAt, 0, line);
 	return lines.join("\n");
+}
+
+/** Return every content line range owned by a matching heading, excluding headings. */
+export function headingSectionRanges(
+	lines: string[],
+	heading: string
+): Array<{ start: number; end: number }> {
+	const h = heading.trim();
+	if (!h) return [{ start: 0, end: lines.length }];
+	const headingText = normalizeHeadingText(h.replace(/^#+\s*/, ""));
+	const configuredLevel = h.match(/^(#{1,6})\s+/)?.[1]?.length ?? 2;
+	const skip = nonHeadingLines(lines);
+	const headingIndexes: Array<{ index: number; level: number }> = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (skip[i]) continue;
+		const match = lines[i]?.match(/^(#{1,6})\s+(.*)$/);
+		if (
+			match?.[2] !== undefined &&
+			match[1]?.length === configuredLevel &&
+			normalizeHeadingText(match[2]) === headingText
+		) {
+			headingIndexes.push({ index: i, level: match[1]?.length ?? 6 });
+		}
+	}
+	return headingIndexes.map(({ index, level }) => {
+		let end = lines.length;
+		for (let i = index + 1; i < lines.length; i++) {
+			const nextHeading = !skip[i]
+				? lines[i]?.match(/^(#{1,6})\s/)
+				: null;
+			if (nextHeading?.[1] && nextHeading[1].length <= level) {
+				end = i;
+				break;
+			}
+		}
+		return { start: index + 1, end };
+	});
+}
+
+/** Return the first content line range owned by a heading, excluding the heading. */
+export function headingSectionRange(
+	lines: string[],
+	heading: string
+): { start: number; end: number } | null {
+	return headingSectionRanges(lines, heading)[0] ?? null;
 }
 

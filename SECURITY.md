@@ -44,3 +44,17 @@ desired.
 All devices sharing a vault should run the same plugin version. Pre-1.4 releases
 do not understand versioned activity shards and can overwrite synchronized v2
 state.
+
+## Daily Notes integration and migration
+
+Importing and rechecking the Daily Notes binding reads `daily-notes.json` from
+Obsidian's vault configuration directory through the public `DataAdapter`.
+Only the folder, date format, and template path are retained in synchronized
+plugin settings. The plugin does not access core-plugin instances or other
+private runtime objects.
+
+The legacy-note migration reads and copies full Markdown note bodies. It writes
+exact recovery copies and a manifest under `Vault Activity Heatmap migrations`
+before or alongside destination changes. Legacy sources are never modified or
+deleted. Those backups contain private note content and should be protected by
+the same vault access and sync controls as the original notes.

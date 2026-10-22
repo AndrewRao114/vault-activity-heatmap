@@ -24,7 +24,7 @@ __export(main_exports, {
   default: () => VaultActivityHeatmapPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian11 = require("obsidian");
+var import_obsidian14 = require("obsidian");
 
 // src/defaults.ts
 var VIEW_TYPE_HEATMAP = "vault-activity-heatmap";
@@ -56,6 +56,11 @@ var DEFAULT_SETTINGS = {
   excludeFolders: [],
   firstDayOfWeek: 1,
   lastFolderFilter: "",
+  taskNoteSource: "unconfigured",
+  coreDailyNotesFolder: "",
+  coreDailyNotesFormat: "YYYY-MM-DD",
+  coreDailyNotesTemplate: "",
+  coreDailyNotesImported: false,
   reflectionFolder: "Daily reflection",
   dailyNoteFormat: "YYYY-MM-DD",
   taskHeading: "## Tasks",
@@ -598,7 +603,7 @@ ${summary.trim()}
   }
 };
 
-// src/services/daily-notes.ts
+// src/services/daily-note-migration.ts
 var import_obsidian4 = require("obsidian");
 
 // src/utils/markdown.ts
@@ -651,15 +656,18 @@ function insertUnderHeading(content, heading, line) {
   }
   const headingText = normalizeHeadingText(h.replace(/^#+\s*/, ""));
   const headingLine = h.startsWith("#") ? h : "## " + h;
+  const configuredLevel = h.match(/^(#{1,6})\s+/)?.[1]?.length ?? 2;
   const lines = content.split("\n");
   const skip = nonHeadingLines(lines);
   let idx = -1;
+  let headingLevel = 6;
   for (let i = 0; i < lines.length; i++) {
     if (skip[i]) continue;
-    const m = lines[i]?.match(/^#{1,6}\s+(.*)$/);
-    const text = m?.[1];
-    if (text !== void 0 && normalizeHeadingText(text) === headingText) {
+    const m = lines[i]?.match(/^(#{1,6})\s+(.*)$/);
+    const text = m?.[2];
+    if (text !== void 0 && m?.[1]?.length === configuredLevel && normalizeHeadingText(text) === headingText) {
       idx = i;
+      headingLevel = m?.[1]?.length ?? 6;
       break;
     }
   }
@@ -670,7 +678,8 @@ function insertUnderHeading(content, heading, line) {
   let end = lines.length;
   for (let i = idx + 1; i < lines.length; i++) {
     if (skip[i]) continue;
-    if (/^#{1,6}\s/.test(lines[i] ?? "")) {
+    const nextHeading = lines[i]?.match(/^(#{1,6})\s/);
+    if (nextHeading?.[1] && nextHeading[1].length <= headingLevel) {
       end = i;
       break;
     }
@@ -680,6 +689,1266 @@ function insertUnderHeading(content, heading, line) {
   lines.splice(insertAt, 0, line);
   return lines.join("\n");
 }
+function headingSectionRanges(lines, heading) {
+  const h = heading.trim();
+  if (!h) return [{ start: 0, end: lines.length }];
+  const headingText = normalizeHeadingText(h.replace(/^#+\s*/, ""));
+  const configuredLevel = h.match(/^(#{1,6})\s+/)?.[1]?.length ?? 2;
+  const skip = nonHeadingLines(lines);
+  const headingIndexes = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (skip[i]) continue;
+    const match = lines[i]?.match(/^(#{1,6})\s+(.*)$/);
+    if (match?.[2] !== void 0 && match[1]?.length === configuredLevel && normalizeHeadingText(match[2]) === headingText) {
+      headingIndexes.push({ index: i, level: match[1]?.length ?? 6 });
+    }
+  }
+  return headingIndexes.map(({ index, level }) => {
+    let end = lines.length;
+    for (let i = index + 1; i < lines.length; i++) {
+      const nextHeading = !skip[i] ? lines[i]?.match(/^(#{1,6})\s/) : null;
+      if (nextHeading?.[1] && nextHeading[1].length <= level) {
+        end = i;
+        break;
+      }
+    }
+    return { start: index + 1, end };
+  });
+}
+
+// src/utils/daily-note-migration.ts
+function splitFrontmatter(content) {
+  const opening = /^---[ \t]*(?:\r\n|\n)/.exec(content);
+  if (!opening) return { frontmatter: null, body: content };
+  const closingPattern = /^(?:---|\.\.\.)[ \t]*(?:\r\n|\n|$)/gm;
+  closingPattern.lastIndex = opening[0].length;
+  const closing = closingPattern.exec(content);
+  if (!closing) return { frontmatter: null, body: content };
+  const closingLineEndingLength = closing[0].endsWith("\r\n") ? 2 : closing[0].endsWith("\n") ? 1 : 0;
+  const frontmatterEnd = closing.index + closing[0].length - closingLineEndingLength;
+  const bodyStart = closing.index + closing[0].length;
+  return {
+    frontmatter: content.slice(0, frontmatterEnd),
+    body: content.slice(bodyStart)
+  };
+}
+function normalizedFrontmatter(frontmatter) {
+  return frontmatter.replace(/\r\n/g, "\n").trimEnd();
+}
+function frontmatterConflict(sourceContent, targetContent) {
+  const source = splitFrontmatter(sourceContent).frontmatter;
+  const target = splitFrontmatter(targetContent).frontmatter;
+  return Boolean(
+    source && target && normalizedFrontmatter(source) !== normalizedFrontmatter(target)
+  );
+}
+async function sha256Hex(content) {
+  const bytes = new TextEncoder().encode(content);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function migrationSourceId(sourcePath) {
+  return encodeURIComponent(sourcePath.replace(/\\/g, "/"));
+}
+function markerPrefix(sourcePath) {
+  return `<!-- vah-migration:v1 source-id="${migrationSourceId(sourcePath)}"`;
+}
+function migrationMarker(sourcePath, sourceHash, mode) {
+  return `${markerPrefix(sourcePath)} source-hash="${sourceHash}" mode="${mode}" -->`;
+}
+function classifyMigrationTarget(sourcePath, sourceHash, sourceContent, targetContent) {
+  if (targetContent === null) return { status: "create", warning: "" };
+  if (targetContent === sourceContent) {
+    return { status: "identical", warning: "" };
+  }
+  const prefix = markerPrefix(sourcePath);
+  const markerIndex = targetContent.indexOf(prefix);
+  if (markerIndex !== -1) {
+    const markerEnd = targetContent.indexOf("-->", markerIndex);
+    const marker = markerEnd === -1 ? targetContent.slice(markerIndex) : targetContent.slice(markerIndex, markerEnd + 3);
+    if (marker.includes(`source-hash="${sourceHash}"`)) {
+      return { status: "already-imported", warning: "" };
+    }
+    return {
+      status: "changed-after-import",
+      warning: "The source changed after an earlier import. Review it manually before importing again."
+    };
+  }
+  if (frontmatterConflict(sourceContent, targetContent)) {
+    return {
+      status: "blocked",
+      warning: "Source and destination contain conflicting YAML frontmatter. Resolve their properties manually before migrating this note."
+    };
+  }
+  return { status: "merge", warning: "" };
+}
+function trailingNewline(content) {
+  return content.endsWith("\n") ? content : content + "\n";
+}
+function createMigratedTarget(sourcePath, sourceHash, sourceContent, importedContent = sourceContent) {
+  return `${trailingNewline(importedContent)}
+${migrationMarker(
+    sourcePath,
+    sourceHash,
+    "created"
+  )}
+`;
+}
+function mergeMigratedTarget(sourcePath, sourceHash, sourceContent, targetContent, importedContent = sourceContent) {
+  if (frontmatterConflict(sourceContent, targetContent)) {
+    throw new Error(
+      "Cannot merge notes with conflicting YAML frontmatter. Resolve their properties manually first."
+    );
+  }
+  const sourceParts = splitFrontmatter(sourceContent);
+  const importedParts = splitFrontmatter(importedContent);
+  const targetParts = splitFrontmatter(targetContent);
+  const importedBody = sourceParts.frontmatter ? importedParts.body : importedContent;
+  const imported = [
+    migrationMarker(sourcePath, sourceHash, "merged"),
+    "## Imported legacy reflection",
+    `Imported from \`${sourcePath}\` by Vault Activity Heatmap.`,
+    "",
+    importedBody,
+    "<!-- /vah-migration:v1 -->"
+  ].join("\n");
+  const targetWithFrontmatter = sourceParts.frontmatter && !targetParts.frontmatter ? `${sourceParts.frontmatter}
+${targetContent}` : targetContent;
+  const separator = targetWithFrontmatter.endsWith("\n") ? "\n" : "\n\n";
+  return `${targetWithFrontmatter}${separator}${imported}
+`;
+}
+function markIdenticalTarget(sourcePath, sourceHash, targetContent) {
+  return `${trailingNewline(targetContent)}
+${migrationMarker(
+    sourcePath,
+    sourceHash,
+    "identical"
+  )}
+`;
+}
+function dirname(path) {
+  const parts = path.replace(/\\/g, "/").split("/");
+  parts.pop();
+  return parts.filter(Boolean);
+}
+function resolveRelativePath(base, relative) {
+  const resolved = [...base];
+  for (const part of relative.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (resolved.length === 0) return null;
+      resolved.pop();
+    } else {
+      resolved.push(part);
+    }
+  }
+  return resolved;
+}
+function relativePath(from, to) {
+  let common = 0;
+  while (common < from.length && common < to.length && from[common] === to[common]) {
+    common++;
+  }
+  const up = new Array(from.length - common).fill("..");
+  const down = to.slice(common);
+  return [...up, ...down].join("/") || ".";
+}
+function rewriteRelativeMarkdownLinks(content, sourcePath, targetPath, migratedPaths = /* @__PURE__ */ new Map()) {
+  let rewritten = 0;
+  let unresolved = 0;
+  const sourceDir = dirname(sourcePath);
+  const targetDir = dirname(targetPath);
+  const lineEnding = content.includes("\r\n") ? "\r\n" : "\n";
+  const lines = content.split(/\r?\n/);
+  const ignored = nonHeadingLines(lines);
+  let frontmatterEnd = -1;
+  if (lines[0]?.trim() === "---") {
+    for (let index = 1; index < lines.length; index++) {
+      const trimmed = lines[index]?.trim() ?? "";
+      if (trimmed === "---" || trimmed === "...") {
+        frontmatterEnd = index;
+        break;
+      }
+    }
+  }
+  const rewriteDestination = (rawDestination) => {
+    const angled = rawDestination.startsWith("<") && rawDestination.endsWith(">");
+    const destination = angled ? rawDestination.slice(1, -1) : rawDestination;
+    if (destination.includes("\\")) {
+      return { value: rawDestination, changed: false, unresolved: true };
+    }
+    if (!destination || destination.startsWith("#") || destination.startsWith("/") || destination.startsWith("data:") || destination.startsWith("mailto:") || destination.startsWith("obsidian:") || /^[a-z][a-z0-9+.-]*:/i.test(destination)) {
+      return { value: rawDestination, changed: false, unresolved: false };
+    }
+    const match = destination.match(/^([^?#]*)([?#].*)?$/);
+    const linkPath = match?.[1] ?? "";
+    const tail = match?.[2] ?? "";
+    if (!linkPath) {
+      return { value: rawDestination, changed: false, unresolved: false };
+    }
+    const absolute = resolveRelativePath(sourceDir, linkPath);
+    if (!absolute) {
+      return { value: rawDestination, changed: false, unresolved: true };
+    }
+    const absolutePath = absolute.join("/");
+    const mappedPath = migratedPaths.get(absolutePath) ?? (!absolutePath.toLowerCase().endsWith(".md") ? migratedPaths.get(`${absolutePath}.md`) : void 0);
+    let resolvedDestination = mappedPath ? mappedPath.replace(/\\/g, "/").split("/").filter(Boolean) : absolute;
+    const mappedFilename = resolvedDestination[resolvedDestination.length - 1];
+    if (mappedPath && !linkPath.toLowerCase().endsWith(".md") && mappedFilename?.toLowerCase().endsWith(".md")) {
+      if (mappedFilename) {
+        resolvedDestination = [
+          ...resolvedDestination.slice(0, -1),
+          mappedFilename.slice(0, -3)
+        ];
+      }
+    }
+    const moved = relativePath(targetDir, resolvedDestination) + tail;
+    return {
+      value: angled ? `<${moved}>` : moved,
+      changed: mappedPath !== void 0 || moved !== destination,
+      unresolved: false
+    };
+  };
+  const rewriteSegment = (segment) => {
+    const reference = segment.match(
+      /^(\s{0,3}\[[^\]]+]:\s*)(<[^>]+>|(?:\\\s|[^\s])+)(.*)$/
+    );
+    if (reference?.[1] && reference[2] !== void 0) {
+      const result = rewriteDestination(reference[2]);
+      if (result.unresolved) unresolved++;
+      if (result.changed) rewritten++;
+      return `${reference[1]}${result.value}${reference[3] ?? ""}`;
+    }
+    if (/!?\[[^\]]*]\([^)\n]*\([^)\n]*\)/.test(segment)) {
+      unresolved++;
+      return segment;
+    }
+    const markdownLinks = segment.replace(
+      /(!?\[[^\]]*]\()(<[^>]+>|[^)\s]+)([^)]*\))/g,
+      (full, prefix, rawDestination, suffix) => {
+        const suffixContent = suffix.slice(0, -1).trim();
+        if (suffixContent && !/^"(?:[^"\\]|\\.)*"$/.test(suffixContent) && !/^'(?:[^'\\]|\\.)*'$/.test(suffixContent) && !/^\((?:[^)\\]|\\.)*\)$/.test(suffixContent)) {
+          unresolved++;
+          return full;
+        }
+        const result = rewriteDestination(rawDestination);
+        if (result.unresolved) unresolved++;
+        if (result.changed) rewritten++;
+        return `${prefix}${result.value}${suffix}`;
+      }
+    );
+    const wikiLinks = markdownLinks.replace(
+      /(!?\[\[)(\.\.?\/[^|\]#]+)([^\]]*\]\])/g,
+      (_full, prefix, linkPath, suffix) => {
+        const result = rewriteDestination(linkPath);
+        if (result.unresolved) unresolved++;
+        if (result.changed) rewritten++;
+        return `${prefix}${result.value}${suffix}`;
+      }
+    );
+    const quotedHtml = wikiLinks.replace(
+      /(\b(?:src|href)\s*=\s*)(["'])([^"']+)\2/gi,
+      (_full, prefix, quote, destination) => {
+        const result = rewriteDestination(destination);
+        if (result.unresolved) unresolved++;
+        if (result.changed) rewritten++;
+        return `${prefix}${quote}${result.value}${quote}`;
+      }
+    );
+    return quotedHtml.replace(
+      /(\b(?:src|href)\s*=\s*)(?!["'])([^\s>]+?)(?=\s|\/?>)/gi,
+      (_full, prefix, destination) => {
+        const result = rewriteDestination(destination);
+        if (result.unresolved) unresolved++;
+        if (result.changed) rewritten++;
+        return `${prefix}${result.value}`;
+      }
+    );
+  };
+  let inlineDelimiterLength = 0;
+  let skippedPotentialLink = false;
+  const isLocalDestination = (raw) => {
+    const destination = raw.trim().replace(/^<|>$/g, "");
+    return Boolean(
+      destination && !destination.startsWith("#") && !destination.startsWith("/") && !destination.startsWith("data:") && !destination.startsWith("mailto:") && !destination.startsWith("obsidian:") && !/^[a-z][a-z0-9+.-]*:/i.test(destination)
+    );
+  };
+  const hasPotentialRelativeLink = (value) => {
+    if (/!?\[\[\.\.?\/[^\]]+\]\]/.test(value)) return true;
+    if (hasRelativeMarkdownLinks(value)) return true;
+    const reference = value.match(
+      /^\s{0,3}\[[^\]]+]:\s*(<[^>]+>|(?:\\\s|[^\s])+)(?:\s|$)/
+    );
+    if (reference?.[1] && isLocalDestination(reference[1])) return true;
+    for (const match of value.matchAll(
+      /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi
+    )) {
+      if (match[1] && isLocalDestination(match[1])) return true;
+    }
+    for (const match of value.matchAll(
+      /\b(?:src|href)\s*=\s*(?!["'])([^\s>]+?)(?=\s|\/?>)/gi
+    )) {
+      if (match[1] && isLocalDestination(match[1])) return true;
+    }
+    return false;
+  };
+  const hasPotentialFrontmatterPath = (value) => {
+    const withoutComment = value.split(/\s+#/, 1)[0] ?? value;
+    return /(^|[:\-\[,{]\s*)(?:["']?)\.\.?\/[^"'#\s,\]}]+/.test(
+      withoutComment
+    );
+  };
+  const outsideInlineCode = (line) => {
+    const parts = line.split(/(`+)/);
+    return parts.map((part) => {
+      if (/^`+$/.test(part)) {
+        if (inlineDelimiterLength === 0) {
+          inlineDelimiterLength = part.length;
+        } else if (part.length === inlineDelimiterLength) {
+          inlineDelimiterLength = 0;
+        }
+        return part;
+      }
+      if (inlineDelimiterLength === 0) return rewriteSegment(part);
+      if (hasPotentialRelativeLink(part)) skippedPotentialLink = true;
+      return part;
+    }).join("");
+  };
+  const next = lines.map((line, index) => {
+    if (index <= frontmatterEnd) {
+      if (hasPotentialRelativeLink(line) || hasPotentialFrontmatterPath(line)) {
+        unresolved++;
+      }
+      return line;
+    }
+    if (ignored[index] || /^( {4}|\t)/.test(line)) return line;
+    return outsideInlineCode(line);
+  });
+  if (inlineDelimiterLength !== 0 && skippedPotentialLink) unresolved++;
+  return { content: next.join(lineEnding), rewritten, unresolved };
+}
+function hasRelativeMarkdownLinks(content) {
+  if (/!?\[\[\.\.?\/[^\]]+\]\]/.test(content)) return true;
+  const links = content.matchAll(/!?\[[^\]]*]\(([^)]+)\)/g);
+  for (const match of links) {
+    const raw = match[1]?.trim().replace(/^<|>$/g, "") ?? "";
+    const destination = raw.split(/\s+["']/)[0] ?? "";
+    if (destination && !destination.startsWith("#") && !destination.startsWith("/") && !destination.startsWith("data:") && !destination.startsWith("mailto:") && !destination.startsWith("obsidian:") && !/^[a-z][a-z0-9+.-]*:/i.test(destination)) {
+      return true;
+    }
+  }
+  return false;
+}
+function hasCompleteCalendarDateTokens(format) {
+  const tokens = format.replace(/\[[^\]]*]/g, "").replace(/\\./g, "");
+  return /Y{2,4}/.test(tokens) && /M{1,4}/.test(tokens) && /D{1,4}/.test(tokens);
+}
+
+// src/utils/daily-note-settings.ts
+function parseDailyNotesBinding(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Daily Notes configuration is not a JSON object.");
+  }
+  const record = value;
+  const stringSetting = (key, fallback) => {
+    const setting = record[key];
+    if (setting === void 0) return fallback;
+    if (typeof setting !== "string") {
+      throw new Error(`Daily Notes "${key}" must be a string.`);
+    }
+    return setting.trim();
+  };
+  return {
+    folder: trimVaultPath(stringSetting("folder", "")),
+    format: stringSetting("format", "YYYY-MM-DD") || "YYYY-MM-DD",
+    template: trimVaultPath(stringSetting("template", ""))
+  };
+}
+function trimVaultPath(path) {
+  return path.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+}
+function bindingsEqual(left, right) {
+  return trimVaultPath(left.folder) === trimVaultPath(right.folder) && (left.format.trim() || "YYYY-MM-DD") === (right.format.trim() || "YYYY-MM-DD") && trimVaultPath(left.template) === trimVaultPath(right.template);
+}
+function buildDailyNotePath(binding, formattedName) {
+  const folder = trimVaultPath(binding.folder);
+  const name = formattedName.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (!name || [...folder.split("/"), ...name.split("/")].some(
+    (part) => part === "." || part === ".."
+  )) {
+    throw new Error("Daily Notes format produced an unsafe or empty path.");
+  }
+  const fileName = name.toLowerCase().endsWith(".md") ? name : name + ".md";
+  return `${folder ? folder + "/" : ""}${fileName}`;
+}
+
+// src/services/daily-note-migration.ts
+var MIGRATION_ROOT = "Vault Activity Heatmap migrations";
+var MIGRATION_LEASE_PATH = `${MIGRATION_ROOT}/migration-lease.json`;
+var MIGRATION_LEASE_DURATION_MS = 6 * 60 * 60 * 1e3;
+function withoutTrailingLineEndings(content, count) {
+  let result = content;
+  for (let index = 0; index < count; index++) {
+    const match = result.match(/(?:\r\n|\n)$/);
+    if (!match) return null;
+    result = result.slice(0, -match[0].length);
+  }
+  return result;
+}
+function reconcileImportedTarget(record, migratedPaths) {
+  const { item, sourceContent, initialContent } = record;
+  const legacyRewrite = rewriteRelativeMarkdownLinks(
+    sourceContent,
+    item.sourcePath,
+    item.targetPath
+  );
+  const mappedRewrite = rewriteRelativeMarkdownLinks(
+    sourceContent,
+    item.sourcePath,
+    item.targetPath,
+    migratedPaths
+  );
+  if (legacyRewrite.unresolved > 0 || mappedRewrite.unresolved > 0) {
+    throw new Error(
+      "Previously imported note contains links that cannot be reconciled safely."
+    );
+  }
+  if (legacyRewrite.content === mappedRewrite.content) return initialContent;
+  const generatedModes = [
+    {
+      mode: "created",
+      legacy: createMigratedTarget(
+        item.sourcePath,
+        item.sourceHash,
+        sourceContent,
+        legacyRewrite.content
+      ),
+      mapped: createMigratedTarget(
+        item.sourcePath,
+        item.sourceHash,
+        sourceContent,
+        mappedRewrite.content
+      )
+    },
+    {
+      mode: "identical",
+      legacy: markIdenticalTarget(
+        item.sourcePath,
+        item.sourceHash,
+        legacyRewrite.content
+      ),
+      mapped: markIdenticalTarget(
+        item.sourcePath,
+        item.sourceHash,
+        mappedRewrite.content
+      )
+    }
+  ];
+  for (const generated of generatedModes) {
+    if (!initialContent.includes(migrationMarker(
+      item.sourcePath,
+      item.sourceHash,
+      generated.mode
+    ))) {
+      continue;
+    }
+    if (initialContent === generated.mapped) return initialContent;
+    if (initialContent === generated.legacy) return generated.mapped;
+    throw new Error(
+      "Previously imported destination was edited after import; reconcile its links manually."
+    );
+  }
+  const mergedMarker = migrationMarker(
+    item.sourcePath,
+    item.sourceHash,
+    "merged"
+  );
+  const markerIndex = initialContent.indexOf(mergedMarker);
+  if (markerIndex === -1) {
+    throw new Error("Previously imported destination has an unknown migration marker.");
+  }
+  const prefix = initialContent.slice(0, markerIndex);
+  for (const removedLineEndings of [1, 2]) {
+    const baseTargetContent = withoutTrailingLineEndings(
+      prefix,
+      removedLineEndings
+    );
+    if (baseTargetContent === null) continue;
+    const legacy = mergeMigratedTarget(
+      item.sourcePath,
+      item.sourceHash,
+      sourceContent,
+      baseTargetContent,
+      legacyRewrite.content
+    );
+    const mapped = mergeMigratedTarget(
+      item.sourcePath,
+      item.sourceHash,
+      sourceContent,
+      baseTargetContent,
+      mappedRewrite.content
+    );
+    if (initialContent === mapped) return initialContent;
+    if (initialContent === legacy) return mapped;
+  }
+  throw new Error(
+    "Previously imported merge section was edited after import; reconcile its links manually."
+  );
+}
+function parseMigrationLease(content) {
+  try {
+    const value = JSON.parse(content);
+    if (!value || typeof value !== "object") return null;
+    const lease = value;
+    if (lease.version !== 1 || lease.status !== "active" && lease.status !== "complete" || typeof lease.runId !== "string" || typeof lease.startedAt !== "number" || typeof lease.expiresAt !== "number" || typeof lease.sourceFolder !== "string" || typeof lease.targetFolder !== "string") {
+      return null;
+    }
+    return lease;
+  } catch {
+    return null;
+  }
+}
+function serializeMigrationLease(lease) {
+  return `${JSON.stringify(lease, null, 2)}
+`;
+}
+var DailyNoteMigrationService = class {
+  constructor(plugin) {
+    this.plugin = plugin;
+  }
+  sourceFolder() {
+    return this.plugin.settings.reflectionFolder.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  }
+  sourceRelativePath(path) {
+    const folder = this.sourceFolder();
+    if (!folder) return path;
+    const prefix = `${folder}/`;
+    return path.startsWith(prefix) ? path.slice(prefix.length) : null;
+  }
+  async scan() {
+    if (this.plugin.settings.taskNoteSource !== "obsidian-daily-notes") {
+      throw new Error(
+        "Import and select Obsidian Daily Notes before reviewing a migration."
+      );
+    }
+    const check = await this.plugin.dailyNotes.checkCoreDailyNotesSettings();
+    if (!check.ok) throw new Error(check.message);
+    if (!this.sourceFolder()) {
+      throw new Error(
+        "The legacy reflection folder is the vault root. Set its exact former folder before running a whole-note migration."
+      );
+    }
+    const format = this.plugin.settings.dailyNoteFormat.trim() || "YYYY-MM-DD";
+    if (!hasCompleteCalendarDateTokens(format)) {
+      throw new Error(
+        `The legacy format "${format}" does not include unambiguous year, month, and day tokens. Update it before migrating.`
+      );
+    }
+    const items = [];
+    for (const file of this.plugin.app.vault.getMarkdownFiles()) {
+      const relativeWithExtension = this.sourceRelativePath(file.path);
+      if (relativeWithExtension === null || !relativeWithExtension.endsWith(".md")) {
+        continue;
+      }
+      const lowerRelativePath = relativeWithExtension.toLowerCase();
+      const inventoryBlock = lowerRelativePath.includes("conflict") ? "This appears to be a conflict copy and requires manual review." : lowerRelativePath.startsWith(
+        "vault activity heatmap migrations/"
+      ) ? "This appears to be migration recovery data and will not be imported." : "";
+      const relative = relativeWithExtension.slice(0, -3);
+      const filename = relative.includes("/") ? relative.slice(relative.lastIndexOf("/") + 1) : relative;
+      const relativeDate = momentFn(relative, format, true);
+      const relativeMatches = relativeDate.isValid() && relativeDate.format(format) === relative;
+      const filenameDate = momentFn(filename, format, true);
+      const filenameMatches = filenameDate.isValid() && filenameDate.format(format) === filename;
+      const parsed = relativeMatches ? relativeDate : filenameMatches ? filenameDate : null;
+      if (!parsed) {
+        items.push({
+          dateKey: "",
+          sourcePath: file.path,
+          targetPath: "",
+          sourceHash: "",
+          targetHash: "",
+          status: "blocked",
+          warning: `${inventoryBlock ? `${inventoryBlock} ` : ""}The path does not exactly match the legacy format "${format}".`
+        });
+        continue;
+      }
+      const dateKey = parsed.format("YYYY-MM-DD");
+      const nestedWarning = !relativeMatches && filenameMatches ? " Nested legacy path will be flattened to its date-based Daily Note destination." : "";
+      const targetPath = this.plugin.dailyNotePath(dateKey);
+      const sourceContent = await this.plugin.app.vault.cachedRead(file);
+      const sourceHash = await sha256Hex(sourceContent);
+      const target = this.plugin.app.vault.getAbstractFileByPath(targetPath);
+      if (target && !(target instanceof import_obsidian4.TFile)) {
+        items.push({
+          dateKey,
+          sourcePath: file.path,
+          targetPath,
+          sourceHash,
+          targetHash: "",
+          status: "blocked",
+          warning: "The destination exists but is not a Markdown file."
+        });
+        continue;
+      }
+      const targetContent = target instanceof import_obsidian4.TFile ? await this.plugin.app.vault.cachedRead(target) : null;
+      const targetHash = targetContent === null ? "" : await sha256Hex(targetContent);
+      if (inventoryBlock) {
+        items.push({
+          dateKey,
+          sourcePath: file.path,
+          targetPath,
+          sourceHash,
+          targetHash,
+          status: "blocked",
+          warning: inventoryBlock
+        });
+        continue;
+      }
+      const classification = classifyMigrationTarget(
+        file.path,
+        sourceHash,
+        sourceContent,
+        targetContent
+      );
+      const linkPreview = rewriteRelativeMarkdownLinks(
+        sourceContent,
+        file.path,
+        targetPath
+      );
+      const linkWarning = linkPreview.unresolved > 0 ? ` ${linkPreview.unresolved} relative links cannot be rewritten safely.` : linkPreview.rewritten > 0 ? ` ${linkPreview.rewritten} relative links will be rewritten for the destination; verify them after copying.` : "";
+      items.push({
+        dateKey,
+        sourcePath: file.path,
+        targetPath,
+        sourceHash,
+        targetHash,
+        status: file.path === targetPath || linkPreview.unresolved > 0 ? "blocked" : classification.status,
+        warning: (file.path === targetPath ? "Source and destination are the same file." : linkPreview.unresolved > 0 ? "The note contains relative links that require manual review." : classification.warning) + linkWarning + nestedWarning
+      });
+    }
+    const byTarget = /* @__PURE__ */ new Map();
+    for (const item of items) {
+      if (!item.targetPath) continue;
+      const matches = byTarget.get(item.targetPath) ?? [];
+      matches.push(item);
+      byTarget.set(item.targetPath, matches);
+    }
+    for (const matches of byTarget.values()) {
+      if (matches.length < 2) continue;
+      for (const item of matches) {
+        item.status = "blocked";
+        item.warning = "More than one legacy note resolves to this destination.";
+      }
+    }
+    return {
+      createdAt: Date.now(),
+      sourceFolder: this.sourceFolder(),
+      sourceFormat: format,
+      targetFolder: check.binding.folder,
+      targetBinding: check.binding,
+      legacyAttachments: this.plugin.app.vault.getFiles().filter(
+        (file) => this.sourceRelativePath(file.path) !== null && file.extension.toLowerCase() !== "md"
+      ).map((file) => file.path).sort((a, b) => a.localeCompare(b)),
+      items: items.sort((a, b) => a.sourcePath.localeCompare(b.sourcePath))
+    };
+  }
+  async ensureFolder(path) {
+    await this.plugin.dailyNotes.ensureFolder(path);
+  }
+  async createBackup(backupFolder, index, label, content) {
+    const path = (0, import_obsidian4.normalizePath)(
+      `${backupFolder}/${String(index + 1).padStart(4, "0")}-${label}.md`
+    );
+    await this.plugin.app.vault.create(path, content);
+    return path;
+  }
+  async acquireMigrationLease(runId, plan) {
+    await this.ensureFolder(MIGRATION_ROOT);
+    const now = Date.now();
+    const nextLease = {
+      version: 1,
+      status: "active",
+      runId,
+      startedAt: now,
+      expiresAt: now + MIGRATION_LEASE_DURATION_MS,
+      sourceFolder: plan.sourceFolder,
+      targetFolder: plan.targetFolder
+    };
+    const nextContent = serializeMigrationLease(nextLease);
+    const claimExisting = async (file) => {
+      await this.plugin.app.vault.process(file, (current) => {
+        const existing2 = parseMigrationLease(current);
+        if (!existing2) {
+          throw new Error(
+            `The migration lease at "${MIGRATION_LEASE_PATH}" is unreadable. Review it before starting a migration.`
+          );
+        }
+        if (existing2.status === "active" && existing2.expiresAt > Date.now()) {
+          throw new Error(
+            `Another migration may still be active (run ${existing2.runId}) until ${new Date(existing2.expiresAt).toISOString()}. Close Obsidian on other devices, wait for sync, or retry after the lease expires.`
+          );
+        }
+        return nextContent;
+      });
+    };
+    const existing = this.plugin.app.vault.getAbstractFileByPath(
+      MIGRATION_LEASE_PATH
+    );
+    if (existing && !(existing instanceof import_obsidian4.TFile)) {
+      throw new Error(
+        `The migration lease path "${MIGRATION_LEASE_PATH}" is not a file.`
+      );
+    }
+    if (existing instanceof import_obsidian4.TFile) {
+      await claimExisting(existing);
+      return;
+    }
+    try {
+      await this.plugin.app.vault.create(MIGRATION_LEASE_PATH, nextContent);
+    } catch (error) {
+      const raced = this.plugin.app.vault.getAbstractFileByPath(
+        MIGRATION_LEASE_PATH
+      );
+      if (raced instanceof import_obsidian4.TFile) {
+        await claimExisting(raced);
+        return;
+      }
+      throw error;
+    }
+  }
+  async completeMigrationLease(runId) {
+    const file = this.plugin.app.vault.getAbstractFileByPath(
+      MIGRATION_LEASE_PATH
+    );
+    if (!(file instanceof import_obsidian4.TFile)) {
+      throw new Error(
+        `Migration finished, but its lease at "${MIGRATION_LEASE_PATH}" could not be marked complete.`
+      );
+    }
+    await this.plugin.app.vault.process(file, (current) => {
+      const lease = parseMigrationLease(current);
+      if (!lease || lease.runId !== runId) {
+        throw new Error(
+          "Migration finished, but its advisory lease changed before it could be marked complete. Review the migration records before retrying."
+        );
+      }
+      const completedAt = Date.now();
+      return serializeMigrationLease({
+        ...lease,
+        status: "complete",
+        completedAt,
+        expiresAt: completedAt
+      });
+    });
+  }
+  async execute(plan) {
+    const check = await this.plugin.dailyNotes.checkCoreDailyNotesSettings();
+    if (!check.ok || !bindingsEqual(check.binding, plan.targetBinding)) {
+      throw new Error(
+        "Daily Notes settings changed after the preview. Run the scan again."
+      );
+    }
+    if (this.sourceFolder() !== plan.sourceFolder || (this.plugin.settings.dailyNoteFormat.trim() || "YYYY-MM-DD") !== plan.sourceFormat) {
+      throw new Error(
+        "Legacy reflection settings changed after the preview. Run the scan again."
+      );
+    }
+    for (const item of plan.items) {
+      if (item.dateKey && item.targetPath !== this.plugin.dailyNotePath(item.dateKey)) {
+        throw new Error(
+          "One or more destination paths changed after the preview. Run the scan again."
+        );
+      }
+    }
+    const runIdBase = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").replace("T", "-").replace("Z", "");
+    let runId = runIdBase;
+    let runSuffix = 2;
+    while (this.plugin.app.vault.getAbstractFileByPath(
+      (0, import_obsidian4.normalizePath)(`${MIGRATION_ROOT}/${runId}`)
+    ) || this.plugin.app.vault.getAbstractFileByPath(
+      (0, import_obsidian4.normalizePath)(`${MIGRATION_ROOT}/${runId}/manifest.md`)
+    )) {
+      runId = `${runIdBase}-${runSuffix}`;
+      runSuffix++;
+    }
+    await this.acquireMigrationLease(runId, plan);
+    try {
+      const backupFolder = (0, import_obsidian4.normalizePath)(
+        `${MIGRATION_ROOT}/${runId}`
+      );
+      await this.ensureFolder(backupFolder);
+      let copied = 0;
+      let skipped = 0;
+      let unresolved = 0;
+      let failed = 0;
+      const errors = [];
+      const rows = [];
+      const writtenRecords = [];
+      const verifiedImportedRecords = [];
+      const verifiedImportedPaths = /* @__PURE__ */ new Map();
+      const manifestPath = (0, import_obsidian4.normalizePath)(`${backupFolder}/manifest.md`);
+      const progressPath = (0, import_obsidian4.normalizePath)(`${backupFolder}/progress.md`);
+      const escapeCell = (value) => value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+      const renderManifest = (status) => [
+        "# Vault Activity Heatmap migration",
+        "",
+        `- Run: ${runId}`,
+        `- Status: ${status}`,
+        `- Source folder: \`${plan.sourceFolder || "/"}\``,
+        `- Source format: \`${plan.sourceFormat}\``,
+        `- Daily Notes folder: \`${plan.targetFolder || "/"}\``,
+        `- Daily Notes format: \`${plan.targetBinding.format}\``,
+        `- Copied, merged, or marked: ${copied}`,
+        `- Skipped: ${skipped}`,
+        `- Unresolved: ${unresolved}`,
+        `- Failed: ${failed}`,
+        "- Legacy originals were not changed or deleted.",
+        `- Non-Markdown files still in the legacy folder: ${plan.legacyAttachments.length}`,
+        "- Execution checkpoints: `progress.md` (updated every 20 items and at completion)",
+        "",
+        "## Planned items",
+        "",
+        "| # | Date | Planned result | Source | Destination | Source SHA-256 | Target SHA-256 |",
+        "| ---: | --- | --- | --- | --- | --- | --- |",
+        ...plan.items.map(
+          (item, index) => `| ${index + 1} | ${item.dateKey || "-"} | ${item.status} | \`${escapeCell(item.sourcePath)}\` | \`${escapeCell(item.targetPath || "-")}\` | \`${item.sourceHash || "-"}\` | \`${item.targetHash || "-"}\` |`
+        ),
+        "",
+        "## Legacy attachment dependencies",
+        "",
+        ...plan.legacyAttachments.length ? plan.legacyAttachments.map((path) => `- \`${escapeCell(path)}\``) : ["- None detected."],
+        ""
+      ].join("\n");
+      const renderProgress = (status, processed) => [
+        "# Vault Activity Heatmap migration progress",
+        "",
+        `- Run: ${runId}`,
+        `- Status: ${status}`,
+        `- Processed through item: ${processed} of ${plan.items.length}`,
+        `- Copied, merged, or marked: ${copied}`,
+        `- Skipped: ${skipped}`,
+        `- Unresolved: ${unresolved}`,
+        `- Failed: ${failed}`,
+        "",
+        "| # | Date | Result | Source backup | Target backup |",
+        "| ---: | --- | --- | --- | --- |",
+        ...rows,
+        ""
+      ].join("\n");
+      await this.plugin.app.vault.create(
+        manifestPath,
+        renderManifest("in progress")
+      );
+      await this.plugin.app.vault.create(
+        progressPath,
+        renderProgress("in progress", 0)
+      );
+      const manifestFile = this.plugin.app.vault.getAbstractFileByPath(manifestPath);
+      const progressFile = this.plugin.app.vault.getAbstractFileByPath(progressPath);
+      if (!(manifestFile instanceof import_obsidian4.TFile) || !(progressFile instanceof import_obsidian4.TFile)) {
+        throw new Error("Migration recovery files could not be created.");
+      }
+      const checkpoint = async (status, processed) => {
+        await this.plugin.app.vault.process(
+          progressFile,
+          () => renderProgress(status, processed)
+        );
+      };
+      const maybeCheckpoint = async (index) => {
+        if ((index + 1) % 20 === 0) {
+          await checkpoint("in progress", index + 1);
+        }
+      };
+      for (let index = 0; index < plan.items.length; index++) {
+        const item = plan.items[index];
+        if (!item) continue;
+        if (item.status !== "create" && item.status !== "merge" && item.status !== "identical") {
+          if (item.status === "already-imported") {
+            try {
+              const source = this.plugin.app.vault.getAbstractFileByPath(item.sourcePath);
+              const target = this.plugin.app.vault.getAbstractFileByPath(item.targetPath);
+              if (!(source instanceof import_obsidian4.TFile) || !(target instanceof import_obsidian4.TFile)) {
+                throw new Error(
+                  "An already imported source or destination no longer exists."
+                );
+              }
+              const sourceContent = await this.plugin.app.vault.cachedRead(source);
+              const targetContent = await this.plugin.app.vault.cachedRead(target);
+              if (await sha256Hex(sourceContent) !== item.sourceHash || await sha256Hex(targetContent) !== item.targetHash || classifyMigrationTarget(
+                item.sourcePath,
+                item.sourceHash,
+                sourceContent,
+                targetContent
+              ).status !== "already-imported") {
+                throw new Error(
+                  "An already imported note changed after the preview."
+                );
+              }
+              verifiedImportedPaths.set(item.sourcePath, item.targetPath);
+              verifiedImportedRecords.push({
+                item,
+                sourceContent,
+                initialContent: targetContent
+              });
+              skipped++;
+              rows.push(
+                `| ${index + 1} | ${item.dateKey || "-"} | already present | - | - |`
+              );
+            } catch (error) {
+              failed++;
+              unresolved++;
+              const message = error instanceof Error ? error.message : String(error);
+              errors.push(`${item.sourcePath}: ${message}`);
+              rows.push(
+                `| ${index + 1} | ${item.dateKey || "-"} | failed: ${escapeCell(message)} | - | - |`
+              );
+            }
+          } else {
+            skipped++;
+            unresolved++;
+            rows.push(
+              `| ${index + 1} | ${item.dateKey || "-"} | ${item.status} | - | - |`
+            );
+          }
+          await maybeCheckpoint(index);
+          continue;
+        }
+        let sourceBackup = "-";
+        let targetBackup = "-";
+        try {
+          const source = this.plugin.app.vault.getAbstractFileByPath(item.sourcePath);
+          if (!(source instanceof import_obsidian4.TFile)) {
+            throw new Error("Source note no longer exists.");
+          }
+          const sourceContent = await this.plugin.app.vault.cachedRead(source);
+          if (await sha256Hex(sourceContent) !== item.sourceHash) {
+            throw new Error("Source changed after the preview; run the scan again.");
+          }
+          sourceBackup = await this.createBackup(
+            backupFolder,
+            index,
+            "source",
+            sourceContent
+          );
+          const rewritten = rewriteRelativeMarkdownLinks(
+            sourceContent,
+            item.sourcePath,
+            item.targetPath
+          );
+          if (rewritten.unresolved > 0) {
+            throw new Error(
+              `${rewritten.unresolved} relative links could not be rewritten safely.`
+            );
+          }
+          const dir = item.targetPath.includes("/") ? item.targetPath.slice(0, item.targetPath.lastIndexOf("/")) : "";
+          await this.ensureFolder(dir);
+          let target = this.plugin.app.vault.getAbstractFileByPath(item.targetPath);
+          if (item.targetHash && !(target instanceof import_obsidian4.TFile)) {
+            throw new Error(
+              "Destination was removed after the preview; run the scan again."
+            );
+          }
+          if (!item.targetHash && target) {
+            throw new Error(
+              "Destination appeared after the preview; run the scan again."
+            );
+          }
+          if (!target) {
+            try {
+              const createdContent = createMigratedTarget(
+                item.sourcePath,
+                item.sourceHash,
+                sourceContent,
+                rewritten.content
+              );
+              await this.plugin.app.vault.create(
+                item.targetPath,
+                createdContent
+              );
+              writtenRecords.push({
+                item,
+                sourceContent,
+                initialContent: createdContent,
+                mode: "created",
+                baseTargetContent: ""
+              });
+              copied++;
+              rows.push(
+                `| ${index + 1} | ${item.dateKey} | created | \`${sourceBackup}\` | - |`
+              );
+              await maybeCheckpoint(index);
+              continue;
+            } catch {
+              target = this.plugin.app.vault.getAbstractFileByPath(item.targetPath);
+              if (target) {
+                throw new Error(
+                  "Destination appeared while migration was running; run the scan again."
+                );
+              }
+            }
+          }
+          if (!(target instanceof import_obsidian4.TFile)) {
+            throw new Error("Destination is not a Markdown file.");
+          }
+          const before = await this.plugin.app.vault.cachedRead(target);
+          if (await sha256Hex(before) !== item.targetHash) {
+            throw new Error(
+              "Destination changed after the preview; run the scan again."
+            );
+          }
+          targetBackup = await this.createBackup(
+            backupFolder,
+            index,
+            "target",
+            before
+          );
+          let operation = "skipped";
+          const writtenContent = await this.plugin.app.vault.process(target, (current) => {
+            if (current !== before) {
+              throw new Error(
+                "Destination changed while its backup was being created."
+              );
+            }
+            const classification = classifyMigrationTarget(
+              item.sourcePath,
+              item.sourceHash,
+              sourceContent,
+              current
+            );
+            if (classification.status === "merge") {
+              operation = "merged";
+              return mergeMigratedTarget(
+                item.sourcePath,
+                item.sourceHash,
+                sourceContent,
+                current,
+                rewritten.content
+              );
+            }
+            if (classification.status === "identical") {
+              operation = "marked identical";
+              return markIdenticalTarget(
+                item.sourcePath,
+                item.sourceHash,
+                rewritten.content
+              );
+            }
+            if (classification.status === "already-imported") {
+              operation = "already present";
+              return current;
+            }
+            throw new Error(
+              "Destination changed after the preview; run the scan again."
+            );
+          });
+          if (operation === "merged" || operation === "marked identical") {
+            writtenRecords.push({
+              item,
+              sourceContent,
+              initialContent: writtenContent,
+              mode: operation === "merged" ? "merged" : "identical",
+              baseTargetContent: before
+            });
+          }
+          if (operation === "merged" || operation === "marked identical") copied++;
+          else skipped++;
+          rows.push(
+            `| ${index + 1} | ${item.dateKey} | ${operation} | \`${sourceBackup}\` | \`${targetBackup}\` |`
+          );
+        } catch (error) {
+          failed++;
+          unresolved++;
+          const message = error instanceof Error ? error.message : String(error);
+          errors.push(`${item.sourcePath}: ${message}`);
+          rows.push(
+            `| ${index + 1} | ${item.dateKey || "-"} | failed: ${escapeCell(message)} | ${sourceBackup === "-" ? "-" : `\`${sourceBackup}\``} | ${targetBackup === "-" ? "-" : `\`${targetBackup}\``} |`
+          );
+        }
+        await maybeCheckpoint(index);
+      }
+      const availableMigratedPaths = new Map(verifiedImportedPaths);
+      const driftedRecords = /* @__PURE__ */ new Set();
+      for (const record of writtenRecords) {
+        const target = this.plugin.app.vault.getAbstractFileByPath(
+          record.item.targetPath
+        );
+        if (target instanceof import_obsidian4.TFile && await this.plugin.app.vault.cachedRead(target) === record.initialContent) {
+          availableMigratedPaths.set(
+            record.item.sourcePath,
+            record.item.targetPath
+          );
+        } else {
+          driftedRecords.add(record);
+          failed++;
+          unresolved++;
+          const message = "Destination changed or disappeared before cross-note reconciliation.";
+          errors.push(`${record.item.sourcePath}: ${message}`);
+          rows.push(
+            `| - | ${record.item.dateKey || "-"} | failed: ${message} | - | - |`
+          );
+        }
+      }
+      for (const record of verifiedImportedRecords) {
+        try {
+          const target = this.plugin.app.vault.getAbstractFileByPath(
+            record.item.targetPath
+          );
+          if (!(target instanceof import_obsidian4.TFile)) {
+            throw new Error(
+              "Previously imported destination disappeared before link reconciliation."
+            );
+          }
+          const reconciledContent = reconcileImportedTarget(
+            record,
+            availableMigratedPaths
+          );
+          await this.plugin.app.vault.process(target, (current) => {
+            if (current !== record.initialContent) {
+              throw new Error(
+                "Previously imported destination changed before link reconciliation."
+              );
+            }
+            return reconciledContent;
+          });
+        } catch (error) {
+          failed++;
+          unresolved++;
+          const message = error instanceof Error ? error.message : String(error);
+          errors.push(`${record.item.sourcePath}: ${message}`);
+          rows.push(
+            `| - | ${record.item.dateKey || "-"} | existing-note link reconciliation failed: ${escapeCell(message)} | - | - |`
+          );
+        }
+      }
+      for (const record of writtenRecords) {
+        if (driftedRecords.has(record)) continue;
+        try {
+          const rewritten = rewriteRelativeMarkdownLinks(
+            record.sourceContent,
+            record.item.sourcePath,
+            record.item.targetPath,
+            availableMigratedPaths
+          );
+          if (rewritten.unresolved > 0) {
+            throw new Error(
+              `${rewritten.unresolved} links became unsafe during cross-note reconciliation.`
+            );
+          }
+          const reconciledContent = record.mode === "created" ? createMigratedTarget(
+            record.item.sourcePath,
+            record.item.sourceHash,
+            record.sourceContent,
+            rewritten.content
+          ) : record.mode === "merged" ? mergeMigratedTarget(
+            record.item.sourcePath,
+            record.item.sourceHash,
+            record.sourceContent,
+            record.baseTargetContent,
+            rewritten.content
+          ) : markIdenticalTarget(
+            record.item.sourcePath,
+            record.item.sourceHash,
+            rewritten.content
+          );
+          const target = this.plugin.app.vault.getAbstractFileByPath(
+            record.item.targetPath
+          );
+          if (!(target instanceof import_obsidian4.TFile)) {
+            throw new Error(
+              "Destination disappeared before cross-note links were reconciled."
+            );
+          }
+          await this.plugin.app.vault.process(target, (current) => {
+            if (current !== record.initialContent) {
+              throw new Error(
+                "Destination changed before cross-note links were reconciled."
+              );
+            }
+            return reconciledContent;
+          });
+        } catch (error) {
+          failed++;
+          unresolved++;
+          const message = error instanceof Error ? error.message : String(error);
+          errors.push(`${record.item.sourcePath}: ${message}`);
+          rows.push(
+            `| - | ${record.item.dateKey || "-"} | link reconciliation failed: ${escapeCell(message)} | - | - |`
+          );
+        }
+      }
+      await checkpoint("complete", plan.items.length);
+      await this.plugin.app.vault.process(
+        manifestFile,
+        () => renderManifest("complete")
+      );
+      new import_obsidian4.Notice(
+        `Heatmap migration finished: ${copied} copied, ${skipped} skipped, ${unresolved} unresolved, ${failed} failed.`
+      );
+      return {
+        runId,
+        backupFolder,
+        copied,
+        skipped,
+        unresolved,
+        failed,
+        errors
+      };
+    } finally {
+      await this.completeMigrationLease(runId);
+    }
+  }
+};
+
+// src/services/daily-notes.ts
+var import_obsidian6 = require("obsidian");
+
+// src/services/daily-note-settings.ts
+var import_obsidian5 = require("obsidian");
+var DailyNotesConfigError = class extends Error {
+};
+function bindingFromSettings(settings) {
+  return {
+    folder: settings.coreDailyNotesFolder,
+    format: settings.coreDailyNotesFormat || "YYYY-MM-DD",
+    template: settings.coreDailyNotesTemplate
+  };
+}
+async function readCoreDailyNotesBinding(vault) {
+  const configPath = (0, import_obsidian5.normalizePath)(`${vault.configDir}/daily-notes.json`);
+  if (!await vault.adapter.exists(configPath)) {
+    throw new DailyNotesConfigError(
+      "Daily Notes configuration was not found on this device. Enable and configure the Daily Notes core plugin first."
+    );
+  }
+  try {
+    const raw = await vault.adapter.read(configPath);
+    return parseDailyNotesBinding(JSON.parse(raw));
+  } catch (error) {
+    if (error instanceof DailyNotesConfigError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new DailyNotesConfigError(
+      `Daily Notes configuration could not be read: ${message}`
+    );
+  }
+}
+
+// src/utils/template.ts
+function expandDailyTemplate(template, values) {
+  return template.replace(
+    /{{\s*(title|date|time)(?::([^}]+))?\s*}}/gi,
+    (_match, rawName, rawFormat) => {
+      const name = rawName.toLowerCase();
+      const format = rawFormat?.trim();
+      if (name === "title") return values.title;
+      if (name === "date") {
+        return format ? values.formatDate(format) : values.defaultDate;
+      }
+      return format ? values.formatTime(format) : values.defaultTime;
+    }
+  );
+}
 
 // src/services/daily-notes.ts
 var DailyNotesService = class {
@@ -687,10 +1956,80 @@ var DailyNotesService = class {
     this.plugin = plugin;
   }
   dailyNotePath(dateKey) {
-    const fmt = this.plugin.settings.dailyNoteFormat.trim() || "YYYY-MM-DD";
+    const binding = this.activeBinding();
+    const fmt = binding.format.trim() || "YYYY-MM-DD";
     const name = momentFn(dateKey, "YYYY-MM-DD").format(fmt);
-    const folder = this.plugin.settings.reflectionFolder.trim().replace(/^\/+|\/+$/g, "");
-    return (folder ? folder + "/" : "") + name + ".md";
+    return (0, import_obsidian6.normalizePath)(buildDailyNotePath(binding, name));
+  }
+  activeBinding() {
+    if (this.plugin.settings.taskNoteSource === "obsidian-daily-notes") {
+      return bindingFromSettings(this.plugin.settings);
+    }
+    return {
+      folder: this.plugin.settings.reflectionFolder,
+      format: this.plugin.settings.dailyNoteFormat || "YYYY-MM-DD",
+      template: ""
+    };
+  }
+  async importCoreDailyNotesSettings() {
+    const binding = await readCoreDailyNotesBinding(this.plugin.app.vault);
+    const previous = {
+      taskNoteSource: this.plugin.settings.taskNoteSource,
+      coreDailyNotesFolder: this.plugin.settings.coreDailyNotesFolder,
+      coreDailyNotesFormat: this.plugin.settings.coreDailyNotesFormat,
+      coreDailyNotesTemplate: this.plugin.settings.coreDailyNotesTemplate,
+      coreDailyNotesImported: this.plugin.settings.coreDailyNotesImported
+    };
+    this.plugin.settings.coreDailyNotesFolder = binding.folder;
+    this.plugin.settings.coreDailyNotesFormat = binding.format;
+    this.plugin.settings.coreDailyNotesTemplate = binding.template;
+    this.plugin.settings.coreDailyNotesImported = true;
+    this.plugin.settings.taskNoteSource = "obsidian-daily-notes";
+    this.plugin.saveSettings();
+    try {
+      await this.plugin.persist();
+    } catch (error) {
+      Object.assign(this.plugin.settings, previous);
+      this.plugin.saveSettings();
+      throw error;
+    }
+    return binding;
+  }
+  async checkCoreDailyNotesSettings() {
+    if (!this.plugin.settings.coreDailyNotesImported) {
+      throw new Error("Import Daily Notes settings before using this provider.");
+    }
+    const local = await readCoreDailyNotesBinding(this.plugin.app.vault);
+    const imported = bindingFromSettings(this.plugin.settings);
+    const ok = bindingsEqual(local, imported);
+    return {
+      ok,
+      binding: local,
+      message: ok ? "Daily Notes settings match this device." : "This device uses different Daily Notes settings. Import them here or align the core plugin settings before writing tasks."
+    };
+  }
+  async bindingForWrite() {
+    if (this.plugin.settings.taskNoteSource === "unconfigured") {
+      new import_obsidian6.Notice(
+        "Heatmap: choose a task-note provider in Settings > Vault Activity Heatmap."
+      );
+      return null;
+    }
+    if (this.plugin.settings.taskNoteSource === "custom") {
+      return this.activeBinding();
+    }
+    try {
+      const check = await this.checkCoreDailyNotesSettings();
+      if (!check.ok) {
+        new import_obsidian6.Notice(`Heatmap: ${check.message}`);
+        return null;
+      }
+      return check.binding;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      new import_obsidian6.Notice(`Heatmap: ${message}`);
+      return null;
+    }
   }
   async ensureFolder(folderPath) {
     if (!folderPath) return;
@@ -711,26 +2050,55 @@ var DailyNotesService = class {
     if (!h) return "";
     return h.startsWith("#") ? h : "## " + h;
   }
-  /** Get the reflection note for a date, creating folder + note if needed. */
+  async templateContent(binding, dateKey, title) {
+    const templatePath = binding.template.trim();
+    if (!templatePath) return "";
+    const candidates = [
+      (0, import_obsidian6.normalizePath)(templatePath),
+      (0, import_obsidian6.normalizePath)(`${templatePath}.md`)
+    ];
+    const templateFile = candidates.map((path) => this.plugin.app.vault.getAbstractFileByPath(path)).find((file) => file instanceof import_obsidian6.TFile);
+    if (!templateFile) {
+      throw new Error(`Daily Notes template "${templatePath}" was not found.`);
+    }
+    const template = await this.plugin.app.vault.cachedRead(templateFile);
+    const date = momentFn(dateKey, "YYYY-MM-DD");
+    const now = momentFn();
+    return expandDailyTemplate(template, {
+      title,
+      defaultDate: date.format("YYYY-MM-DD"),
+      defaultTime: now.format("HH:mm"),
+      formatDate: (format) => date.format(format),
+      formatTime: (format) => now.format(format)
+    });
+  }
+  /** Get the task-backed daily note, creating its folder and template if needed. */
   async getOrCreateDailyNote(dateKey) {
-    const path = this.dailyNotePath(dateKey);
+    const binding = await this.bindingForWrite();
+    if (!binding) return null;
+    const name = momentFn(dateKey, "YYYY-MM-DD").format(
+      binding.format.trim() || "YYYY-MM-DD"
+    );
+    const path = (0, import_obsidian6.normalizePath)(buildDailyNotePath(binding, name));
     const existing = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (existing instanceof import_obsidian4.TFile) return { file: existing, created: false };
+    if (existing instanceof import_obsidian6.TFile) return { file: existing, created: false };
     if (existing) {
-      new import_obsidian4.Notice(`Heatmap: "${path}" exists but is not a note.`);
+      new import_obsidian6.Notice(`Heatmap: "${path}" exists but is not a note.`);
       return null;
     }
     const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
     await this.ensureFolder(dir);
-    const heading = this.headingLine();
     try {
-      const file = await this.plugin.app.vault.create(
-        path,
-        heading ? heading + "\n" : ""
-      );
+      const title = name.split("/").pop() ?? name;
+      const template = await this.templateContent(binding, dateKey, title);
+      const heading = this.headingLine();
+      const content = template || (this.plugin.settings.taskNoteSource === "custom" && heading ? heading + "\n" : "");
+      const file = await this.plugin.app.vault.create(path, content);
       return { file, created: true };
     } catch (e) {
-      new import_obsidian4.Notice(`Heatmap: could not create "${path}".`);
+      const raced = this.plugin.app.vault.getAbstractFileByPath(path);
+      if (raced instanceof import_obsidian6.TFile) return { file: raced, created: false };
+      new import_obsidian6.Notice(`Heatmap: could not create "${path}".`);
       console.error("vault-activity-heatmap: create failed", e);
       return null;
     }
@@ -746,7 +2114,7 @@ var DailyNotesService = class {
       (content2) => insertUnderHeading(content2, this.plugin.settings.taskHeading, taskLine)
     );
     this.plugin.activityService.recordLocalMutation(file, created, content);
-    new import_obsidian4.Notice(`Task added to ${file.path}`);
+    new import_obsidian6.Notice(`Task added to ${file.path}`);
   }
   async openDailyReflection(dateKey) {
     const result = await this.getOrCreateDailyNote(dateKey);
@@ -758,29 +2126,36 @@ var DailyNotesService = class {
     }
     await this.plugin.app.workspace.getLeaf(false).openFile(file);
   }
-  /** Parse the checkbox tasks of a day's reflection note. */
+  /** Parse checkbox tasks from the configured task section. */
   async readDailyTasks(dateKey) {
+    if (this.plugin.settings.taskNoteSource === "unconfigured") {
+      return { file: null, tasks: [] };
+    }
     const path = this.dailyNotePath(dateKey);
     const af = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (!(af instanceof import_obsidian4.TFile)) return { file: null, tasks: [] };
+    if (!(af instanceof import_obsidian6.TFile)) return { file: null, tasks: [] };
     const content = await this.plugin.app.vault.cachedRead(af);
     const lines = content.split("\n");
     const skip = nonHeadingLines(lines);
+    const sections = this.plugin.settings.taskNoteSource === "obsidian-daily-notes" ? headingSectionRanges(lines, this.plugin.settings.taskHeading) : [{ start: 0, end: lines.length }];
+    if (sections.length === 0) return { file: af, tasks: [] };
     const tasks = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (skip[i]) continue;
-      const line = lines[i];
-      if (line === void 0) continue;
-      const m = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
-      const marker = m?.[1];
-      const text = m?.[2];
-      if (marker !== void 0 && text !== void 0) {
-        tasks.push({ line: i, raw: line, text, done: marker !== " " });
+    for (const section of sections) {
+      for (let i = section.start; i < section.end; i++) {
+        if (skip[i]) continue;
+        const line = lines[i];
+        if (line === void 0) continue;
+        const m = line.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.*)$/);
+        const marker = m?.[1];
+        const text = m?.[2];
+        if (marker !== void 0 && text !== void 0) {
+          tasks.push({ line: i, raw: line, text, done: marker !== " " });
+        }
       }
     }
     return { file: af, tasks };
   }
-  /** Check or uncheck a task line in a reflection note. */
+  /** Check or uncheck a task line in a daily note. */
   async toggleTask(file, task, done) {
     let changed = false;
     this.plugin.activityService.beginLocalMutation(file);
@@ -800,30 +2175,30 @@ var DailyNotesService = class {
 };
 
 // src/services/notifications.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 var NotificationService = class {
   constructor(plugin) {
     this.plugin = plugin;
   }
   async notifyAll(title, body) {
     if (this.plugin.settings.notifyDesktop) {
-      if (import_obsidian5.Platform.isDesktopApp && typeof Notification !== "undefined") {
+      if (import_obsidian7.Platform.isDesktopApp && typeof Notification !== "undefined") {
         try {
           new Notification(title, { body: body.slice(0, 180) });
         } catch (e) {
           console.error("vault-activity-heatmap: desktop notification failed", e);
         }
-      } else if (import_obsidian5.Platform.isMobileApp) {
-        new import_obsidian5.Notice(`${title}: ${body.slice(0, 180)}`);
+      } else if (import_obsidian7.Platform.isMobileApp) {
+        new import_obsidian7.Notice(`${title}: ${body.slice(0, 180)}`);
       }
     }
     const hook = this.plugin.getNotificationWebhook().trim();
     if (hook) {
       try {
-        if (import_obsidian5.Platform.isMobileApp && !/^https:\/\//i.test(hook)) {
+        if (import_obsidian7.Platform.isMobileApp && !/^https:\/\//i.test(hook)) {
           throw new Error("mobile webhook URLs must use HTTPS");
         }
-        const response = await (0, import_obsidian5.requestUrl)({
+        const response = await (0, import_obsidian7.requestUrl)({
           url: hook,
           method: "POST",
           body: `${title}
@@ -841,7 +2216,7 @@ ${body.slice(0, 800)}`,
 };
 
 // src/services/sync.ts
-var import_obsidian6 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/services/sync-state.ts
 var LEGACY_DEVICE_ID = "legacy-v1";
@@ -892,6 +2267,11 @@ function sharedSettingsFrom(settings) {
     weeksToShow: settings.weeksToShow,
     excludeFolders: [...settings.excludeFolders],
     firstDayOfWeek: settings.firstDayOfWeek,
+    taskNoteSource: settings.taskNoteSource,
+    coreDailyNotesFolder: settings.coreDailyNotesFolder,
+    coreDailyNotesFormat: settings.coreDailyNotesFormat,
+    coreDailyNotesTemplate: settings.coreDailyNotesTemplate,
+    coreDailyNotesImported: settings.coreDailyNotesImported,
     reflectionFolder: settings.reflectionFolder,
     dailyNoteFormat: settings.dailyNoteFormat,
     taskHeading: settings.taskHeading,
@@ -953,7 +2333,7 @@ function createInitialState(settings, deviceId, deviceName, selectedDay, now) {
     automationDeviceId: versioned("", 1, deviceId, now)
   };
 }
-function sanitizeSharedSettings(value) {
+function sanitizeSharedSettings(value, missingTaskNoteSource = "custom") {
   const candidate = isRecord2(value) ? value : {};
   const stringValue = (key) => typeof candidate[key] === "string" ? candidate[key] : String(DEFAULT_SETTINGS[key]);
   const numberValue = (key) => typeof candidate[key] === "number" && Number.isFinite(candidate[key]) ? candidate[key] : Number(DEFAULT_SETTINGS[key]);
@@ -978,6 +2358,11 @@ function sanitizeSharedSettings(value) {
     weeksToShow: Math.max(4, Math.min(53, Math.round(numberValue("weeksToShow")))),
     excludeFolders: Array.isArray(candidate.excludeFolders) ? candidate.excludeFolders.filter((item) => typeof item === "string") : [...DEFAULT_SETTINGS.excludeFolders],
     firstDayOfWeek: numberValue("firstDayOfWeek") === 0 ? 0 : 1,
+    taskNoteSource: candidate.taskNoteSource === "obsidian-daily-notes" || candidate.taskNoteSource === "custom" || candidate.taskNoteSource === "unconfigured" ? candidate.taskNoteSource : missingTaskNoteSource,
+    coreDailyNotesFolder: stringValue("coreDailyNotesFolder"),
+    coreDailyNotesFormat: stringValue("coreDailyNotesFormat"),
+    coreDailyNotesTemplate: stringValue("coreDailyNotesTemplate"),
+    coreDailyNotesImported: booleanValue("coreDailyNotesImported"),
     reflectionFolder: stringValue("reflectionFolder"),
     dailyNoteFormat: stringValue("dailyNoteFormat"),
     taskHeading: stringValue("taskHeading"),
@@ -1109,6 +2494,14 @@ function sanitizeV2(raw, fallback) {
 }
 function migratePersistedData(raw, deviceId, deviceName, selectedDay, now) {
   const fallback = createInitialState(DEFAULT_SETTINGS, deviceId, deviceName, selectedDay, now);
+  if (raw === null || raw === void 0) {
+    return {
+      state: fallback,
+      legacySecrets: { aiApiKey: "", notifyWebhook: "" },
+      legacyLocal: {},
+      migrated: false
+    };
+  }
   if (isRecord2(raw) && raw.schemaVersion === 2) {
     return {
       state: sanitizeV2(raw, fallback),
@@ -1328,11 +2721,11 @@ function createDeviceId() {
   return `device-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 function defaultDeviceName() {
-  if (import_obsidian6.Platform.isIosApp) return import_obsidian6.Platform.isTablet ? "iPad" : "iPhone";
-  if (import_obsidian6.Platform.isAndroidApp) return import_obsidian6.Platform.isTablet ? "Android tablet" : "Android phone";
-  if (import_obsidian6.Platform.isWin) return "Windows";
-  if (import_obsidian6.Platform.isMacOS) return "Mac";
-  if (import_obsidian6.Platform.isLinux) return "Linux";
+  if (import_obsidian8.Platform.isIosApp) return import_obsidian8.Platform.isTablet ? "iPad" : "iPhone";
+  if (import_obsidian8.Platform.isAndroidApp) return import_obsidian8.Platform.isTablet ? "Android tablet" : "Android phone";
+  if (import_obsidian8.Platform.isWin) return "Windows";
+  if (import_obsidian8.Platform.isMacOS) return "Mac";
+  if (import_obsidian8.Platform.isLinux) return "Linux";
   return "Obsidian device";
 }
 var SyncService = class {
@@ -1588,7 +2981,7 @@ var SyncService = class {
       this.maxTimer = window.setTimeout(() => void this.flush(), MAX_SAVE_MS);
     }
   }
-  async flush() {
+  async flush(throwOnError = false) {
     if (!this.state) return;
     this.clearTimers();
     this.writeQueue = this.writeQueue.catch(() => void 0).then(async () => {
@@ -1618,6 +3011,7 @@ var SyncService = class {
     } catch (error) {
       console.error("vault-activity-heatmap: failed to persist synchronized state", error);
       if (!this.stopping) this.schedulePersist();
+      if (throwOnError) throw error;
     }
   }
   async refreshFromDisk() {
@@ -1659,8 +3053,8 @@ var VaultSyncTransport = class {
 };
 
 // src/ui/add-task-modal.ts
-var import_obsidian7 = require("obsidian");
-var AddTaskModal = class extends import_obsidian7.Modal {
+var import_obsidian9 = require("obsidian");
+var AddTaskModal = class extends import_obsidian9.Modal {
   constructor(app, dateKey, onSubmit) {
     super(app);
     this.dateKey = dateKey;
@@ -1675,7 +3069,7 @@ var AddTaskModal = class extends import_obsidian7.Modal {
       this.close();
       this.onSubmit(text);
     };
-    new import_obsidian7.Setting(this.contentEl).setName("Task").addText((text) => {
+    new import_obsidian9.Setting(this.contentEl).setName("Task").addText((text) => {
       text.setPlaceholder("What needs doing?");
       text.onChange((v) => value = v);
       text.inputEl.addEventListener("keydown", (e) => {
@@ -1687,7 +3081,7 @@ var AddTaskModal = class extends import_obsidian7.Modal {
       });
       window.setTimeout(() => text.inputEl.focus(), 0);
     });
-    new import_obsidian7.Setting(this.contentEl).addButton(
+    new import_obsidian9.Setting(this.contentEl).addButton(
       (btn) => btn.setButtonText("Add task").setCta().onClick(submit)
     );
   }
@@ -1696,8 +3090,169 @@ var AddTaskModal = class extends import_obsidian7.Modal {
   }
 };
 
+// src/ui/daily-note-migration-modal.ts
+var import_obsidian10 = require("obsidian");
+var ConfirmMigrationModal = class extends import_obsidian10.Modal {
+  constructor(plugin, plan, onComplete) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.plan = plan;
+    this.onComplete = onComplete;
+  }
+  onOpen() {
+    this.setTitle("Copy legacy notes?");
+    const actionable = this.plan.items.filter(
+      (item) => item.status === "create" || item.status === "merge" || item.status === "identical"
+    );
+    const merges = actionable.filter((item) => item.status === "merge").length;
+    this.contentEl.createEl("p", {
+      text: `This will copy ${actionable.length} legacy notes into the Daily Notes location. ${merges} existing Daily Notes will receive an imported section.`
+    });
+    this.contentEl.createEl("p", {
+      text: "Original notes will not be changed or deleted. Exact backups and a migration manifest will be created in the vault."
+    });
+    let mergesConfirmed = merges === 0;
+    let otherDevicesConfirmed = false;
+    let copyButton = null;
+    const updateCopyButton = () => {
+      copyButton?.setDisabled(
+        !mergesConfirmed || !otherDevicesConfirmed
+      );
+    };
+    new import_obsidian10.Setting(this.contentEl).setName("Obsidian is closed on other devices").setDesc(
+      "I closed Obsidian on every other device and waited for this device's vault sync to finish."
+    ).addToggle(
+      (toggle) => toggle.setValue(false).onChange((value) => {
+        otherDevicesConfirmed = value;
+        updateCopyButton();
+      })
+    );
+    if (merges > 0) {
+      new import_obsidian10.Setting(this.contentEl).setName(`Review ${merges} existing-note merges`).setDesc(
+        "I reviewed every merge in the preview and understand that an imported section will be appended."
+      ).addToggle(
+        (toggle) => toggle.setValue(false).onChange((value) => {
+          mergesConfirmed = value;
+          updateCopyButton();
+        })
+      );
+    }
+    new import_obsidian10.Setting(this.contentEl).addButton(
+      (button) => button.setButtonText("Cancel").onClick(() => this.close())
+    ).addButton(
+      (button) => (copyButton = button).setButtonText("Copy notes").setCta().setDisabled(true).onClick(async () => {
+        button.setDisabled(true).setButtonText("Copying...");
+        try {
+          const result = await this.plugin.dailyNoteMigration.execute(
+            this.plan
+          );
+          this.close();
+          this.onComplete(result);
+        } catch (error) {
+          button.setDisabled(!mergesConfirmed || !otherDevicesConfirmed).setButtonText("Copy notes");
+          const message = error instanceof Error ? error.message : String(error);
+          this.contentEl.createEl("p", {
+            cls: "mod-warning",
+            text: `Migration stopped: ${message}`
+          });
+        }
+      })
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var DailyNoteMigrationModal = class extends import_obsidian10.Modal {
+  constructor(plugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    this.setTitle("Migrate legacy reflection notes");
+    void this.loadPreview();
+  }
+  async loadPreview() {
+    this.contentEl.empty();
+    this.contentEl.createEl("p", { text: "Scanning legacy notes..." });
+    try {
+      const plan = await this.plugin.dailyNoteMigration.scan();
+      this.renderPreview(plan);
+    } catch (error) {
+      this.contentEl.empty();
+      const message = error instanceof Error ? error.message : String(error);
+      this.contentEl.createEl("p", { text: message });
+      new import_obsidian10.Setting(this.contentEl).addButton(
+        (button) => button.setButtonText("Close").onClick(() => this.close())
+      );
+    }
+  }
+  renderPreview(plan) {
+    this.contentEl.empty();
+    const counts = /* @__PURE__ */ new Map();
+    for (const item of plan.items) {
+      counts.set(item.status, (counts.get(item.status) ?? 0) + 1);
+    }
+    const actionable = (counts.get("create") ?? 0) + (counts.get("merge") ?? 0) + (counts.get("identical") ?? 0);
+    this.contentEl.createEl("p", {
+      text: `${plan.items.length} Markdown notes found. ${counts.get("create") ?? 0} can be created, ${counts.get("merge") ?? 0} can be merged, ${counts.get("identical") ?? 0} already match and will be marked, and ${counts.get("blocked") ?? 0} need manual review.`
+    });
+    this.contentEl.createEl("p", {
+      text: "This assistant is copy-first: it never moves or deletes the legacy originals."
+    });
+    if (plan.legacyAttachments.length > 0) {
+      this.contentEl.createEl("p", {
+        cls: "mod-warning",
+        text: `${plan.legacyAttachments.length} non-Markdown files remain in the legacy folder. Keep that folder so attachments and rewritten links continue to work.`
+      });
+    }
+    const list = this.contentEl.createDiv({ cls: "vah-migration-list" });
+    for (const item of plan.items) {
+      const row = list.createDiv({ cls: "vah-migration-row" });
+      row.createSpan({
+        cls: `vah-migration-status vah-migration-status-${item.status}`,
+        text: item.status
+      });
+      row.createSpan({
+        text: `${item.sourcePath} -> ${item.targetPath || "unresolved"}`
+      });
+      if (item.warning) {
+        row.createDiv({ cls: "setting-item-description", text: item.warning });
+      }
+    }
+    new import_obsidian10.Setting(this.contentEl).addButton(
+      (button) => button.setButtonText("Rescan").onClick(() => void this.loadPreview())
+    ).addButton(
+      (button) => button.setButtonText(`Copy ${actionable} notes`).setCta().setDisabled(actionable === 0).onClick(() => {
+        new ConfirmMigrationModal(this.plugin, plan, (result) => {
+          this.renderResult(result);
+        }).open();
+      })
+    );
+  }
+  renderResult(result) {
+    this.contentEl.empty();
+    this.contentEl.createEl("h3", { text: "Migration complete" });
+    this.contentEl.createEl("p", {
+      text: `${result.copied} notes copied or merged, ${result.skipped} skipped, ${result.unresolved} unresolved, ${result.failed} failed.`
+    });
+    this.contentEl.createEl("p", {
+      text: `Backups and the manifest are in ${result.backupFolder}. Keep the legacy folder until every device has synced and you have reviewed the results.`
+    });
+    for (const error of result.errors.slice(0, 20)) {
+      this.contentEl.createEl("p", { cls: "mod-warning", text: error });
+    }
+    new import_obsidian10.Setting(this.contentEl).addButton(
+      (button) => button.setButtonText("Close").onClick(() => this.close())
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
 // src/ui/heatmap-view.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 
 // src/utils/color.ts
 function hexToRgb(hex) {
@@ -1735,7 +3290,7 @@ function levelColor(baseColor, level) {
 }
 
 // src/ui/heatmap-view.ts
-var HeatmapView = class extends import_obsidian8.ItemView {
+var HeatmapView = class extends import_obsidian11.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.detailEl = null;
@@ -1791,7 +3346,7 @@ var HeatmapView = class extends import_obsidian8.ItemView {
     const root = this.contentEl;
     root.empty();
     const shell = root.createDiv({ cls: "vah-container" });
-    if (import_obsidian8.Platform.isPhone) shell.addClass("vah-phone");
+    if (import_obsidian11.Platform.isPhone) shell.addClass("vah-phone");
     this.applyPanelTheme(shell);
     const container = shell.createDiv({ cls: "vah-content" });
     const allNotes = plugin.app.vault.getMarkdownFiles().filter((f) => isUnderFolder(f.path, folder)).length;
@@ -1804,7 +3359,7 @@ var HeatmapView = class extends import_obsidian8.ItemView {
     this.statBlock(stats, String(activeDays), "Days");
     this.statBlock(stats, String(streak), "Streak");
     const controls = container.createDiv({ cls: "vah-controls" });
-    const dropdown = new import_obsidian8.DropdownComponent(controls);
+    const dropdown = new import_obsidian11.DropdownComponent(controls);
     dropdown.addOption("", "Whole vault");
     for (const path of folderPaths) {
       dropdown.addOption(path, path);
@@ -1926,7 +3481,7 @@ var HeatmapView = class extends import_obsidian8.ItemView {
     }
     legend.createSpan({ text: "More" });
     let scrim = null;
-    if (import_obsidian8.Platform.isPhone) {
+    if (import_obsidian11.Platform.isPhone) {
       scrim = container.createDiv({
         cls: "vah-sheet-scrim",
         attr: { "aria-hidden": "true" }
@@ -1935,9 +3490,9 @@ var HeatmapView = class extends import_obsidian8.ItemView {
       scrim.addEventListener("click", () => this.closeDetailSheet());
     }
     this.detailEl = container.createDiv({
-      cls: import_obsidian8.Platform.isPhone ? "vah-detail vah-detail-sheet" : "vah-detail"
+      cls: import_obsidian11.Platform.isPhone ? "vah-detail vah-detail-sheet" : "vah-detail"
     });
-    if (import_obsidian8.Platform.isPhone) {
+    if (import_obsidian11.Platform.isPhone) {
       this.detailEl.setAttrs({
         role: "dialog",
         "aria-modal": "true",
@@ -1963,7 +3518,7 @@ var HeatmapView = class extends import_obsidian8.ItemView {
       }
     }
     this.lastDetailKey = plugin.selectedDay || todayKey;
-    if (!import_obsidian8.Platform.isPhone || this.sheetOpen) {
+    if (!import_obsidian11.Platform.isPhone || this.sheetOpen) {
       void this.showDetail(this.lastDetailKey, folder);
     }
     window.requestAnimationFrame(() => {
@@ -1977,7 +3532,7 @@ var HeatmapView = class extends import_obsidian8.ItemView {
   }
   selectDay(key) {
     this.lastDetailKey = key;
-    if (import_obsidian8.Platform.isPhone) {
+    if (import_obsidian11.Platform.isPhone) {
       this.sheetOpen = true;
       this.focusSheetOnLoad = true;
     }
@@ -2102,20 +3657,20 @@ var HeatmapView = class extends import_obsidian8.ItemView {
     void video.play().catch(() => void 0);
   }
   createCellMenu(dateKey) {
-    const menu = new import_obsidian8.Menu();
+    const menu = new import_obsidian11.Menu();
     menu.addItem(
-      (item) => item.setTitle("Add task to daily reflection...").setIcon("check-square").onClick(() => {
+      (item) => item.setTitle("Add task to daily note...").setIcon("check-square").onClick(() => {
         new AddTaskModal(this.plugin.app, dateKey, (text) => {
           void this.plugin.addTaskToDailyReflection(dateKey, text);
         }).open();
       })
     );
     menu.addItem(
-      (item) => item.setTitle("Open daily reflection note").setIcon("file-text").onClick(() => void this.plugin.openDailyReflection(dateKey))
+      (item) => item.setTitle("Open daily note").setIcon("file-text").onClick(() => void this.plugin.openDailyReflection(dateKey))
     );
     return menu;
   }
-  /** Right-click and long-press menu for reflection actions. */
+  /** Right-click and long-press menu for daily-note actions. */
   attachCellMenu(cell, dateKey) {
     let suppressContextMenuUntil = 0;
     cell.addEventListener("contextmenu", (e) => {
@@ -2140,7 +3695,7 @@ var HeatmapView = class extends import_obsidian8.ItemView {
         cell.ownerDocument
       );
     });
-    if (!import_obsidian8.Platform.isMobile) return;
+    if (!import_obsidian11.Platform.isMobile) return;
     let timer = null;
     let startX = 0;
     let startY = 0;
@@ -2202,13 +3757,13 @@ var HeatmapView = class extends import_obsidian8.ItemView {
     detailHeader.createEl("h6", {
       text: `${key} - ${files.length} note${files.length === 1 ? "" : "s"}`
     });
-    if (import_obsidian8.Platform.isPhone) {
+    if (import_obsidian11.Platform.isPhone) {
       const actions = detailHeader.createDiv({ cls: "vah-detail-actions" });
       const addTask = actions.createEl("button", {
         cls: "clickable-icon",
         attr: { type: "button", "aria-label": "Add task" }
       });
-      (0, import_obsidian8.setIcon)(addTask, "plus");
+      (0, import_obsidian11.setIcon)(addTask, "plus");
       addTask.setAttr("title", "Add task");
       addTask.addEventListener("click", () => {
         new AddTaskModal(this.plugin.app, key, (text) => {
@@ -2217,16 +3772,16 @@ var HeatmapView = class extends import_obsidian8.ItemView {
       });
       const openNote = actions.createEl("button", {
         cls: "clickable-icon",
-        attr: { type: "button", "aria-label": "Open daily reflection note" }
+        attr: { type: "button", "aria-label": "Open daily note" }
       });
-      (0, import_obsidian8.setIcon)(openNote, "file-text");
-      openNote.setAttr("title", "Open daily reflection note");
+      (0, import_obsidian11.setIcon)(openNote, "file-text");
+      openNote.setAttr("title", "Open daily note");
       openNote.addEventListener("click", () => void this.plugin.openDailyReflection(key));
       const close = actions.createEl("button", {
         cls: "clickable-icon",
         attr: { type: "button", "aria-label": "Close day details" }
       });
-      (0, import_obsidian8.setIcon)(close, "x");
+      (0, import_obsidian11.setIcon)(close, "x");
       close.setAttr("title", "Close day details");
       close.addEventListener("click", () => this.closeDetailSheet());
     }
@@ -2258,7 +3813,7 @@ var HeatmapView = class extends import_obsidian8.ItemView {
       files.forEach(([path, edits], i) => {
         const row = list.createDiv({ cls: "vah-detail-row" });
         const file = this.plugin.app.vault.getAbstractFileByPath(path);
-        const link = file instanceof import_obsidian8.TFile ? row.createEl("button", {
+        const link = file instanceof import_obsidian11.TFile ? row.createEl("button", {
           cls: "vah-detail-link vah-detail-link-live",
           attr: { type: "button" }
         }) : row.createSpan({ cls: "vah-detail-link" });
@@ -2272,7 +3827,7 @@ var HeatmapView = class extends import_obsidian8.ItemView {
         }
         link.createSpan({ cls: "vah-link-name", text: label.slice(slash + 1) });
         link.setAttr("title", path.replace(/\.md$/, ""));
-        if (file instanceof import_obsidian8.TFile) {
+        if (file instanceof import_obsidian11.TFile) {
           link.addEventListener("click", () => {
             void this.plugin.app.workspace.getLeaf(false).openFile(file);
           });
@@ -2285,12 +3840,12 @@ var HeatmapView = class extends import_obsidian8.ItemView {
     if (this.plugin.settings.showTimeline) {
       this.renderTimeline(detail, key, folder);
     }
-    if (import_obsidian8.Platform.isPhone && this.sheetOpen && this.focusSheetOnLoad) {
+    if (import_obsidian11.Platform.isPhone && this.sheetOpen && this.focusSheetOnLoad) {
       this.focusSheetOnLoad = false;
       detail.focus();
     }
   }
-  /** Microsoft To Do-style task list backed by the day's reflection note. */
+  /** Microsoft To Do-style task list backed by the configured daily note. */
   renderTasks(detail, key, folder, daily, focusAddInput) {
     const plugin = this.plugin;
     const section = detail.createDiv({ cls: "vah-section" });
@@ -2339,7 +3894,7 @@ var HeatmapView = class extends import_obsidian8.ItemView {
     } else if (daily.tasks.length === 0) {
       section.createDiv({
         cls: "vah-detail-empty",
-        text: daily.file ? "No tasks in this day's reflection note." : "No reflection note yet - add a task to create one."
+        text: daily.file ? "No tasks in this day's task section." : "No daily note yet - add a task to create one."
       });
     }
     if (done.length > 0) {
@@ -2371,12 +3926,12 @@ var HeatmapView = class extends import_obsidian8.ItemView {
       item.createDiv({ cls: "vah-tl-dot" });
       const name = (s.f.split("/").pop() ?? s.f).replace(/\.md$/, "");
       const target = this.plugin.app.vault.getAbstractFileByPath(s.f);
-      const title = target instanceof import_obsidian8.TFile ? item.createEl("button", {
+      const title = target instanceof import_obsidian11.TFile ? item.createEl("button", {
         cls: "vah-tl-title vah-detail-link-live",
         attr: { type: "button" }
       }) : item.createDiv({ cls: "vah-tl-title" });
       title.setText(s.k === "create" ? `${name} - created` : name);
-      if (target instanceof import_obsidian8.TFile) {
+      if (target instanceof import_obsidian11.TFile) {
         title.addEventListener("click", () => {
           void this.plugin.app.workspace.getLeaf(false).openFile(target);
         });
@@ -2393,11 +3948,11 @@ var HeatmapView = class extends import_obsidian8.ItemView {
 };
 
 // src/ui/settings-tab.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 
 // src/ui/confirm-clear-history-modal.ts
-var import_obsidian9 = require("obsidian");
-var ConfirmClearHistoryModal = class extends import_obsidian9.Modal {
+var import_obsidian12 = require("obsidian");
+var ConfirmClearHistoryModal = class extends import_obsidian12.Modal {
   constructor(app, onConfirm) {
     super(app);
     this.onConfirm = onConfirm;
@@ -2407,7 +3962,7 @@ var ConfirmClearHistoryModal = class extends import_obsidian9.Modal {
     this.contentEl.createEl("p", {
       text: "This deletes every recorded activity day for Vault Activity Heatmap. Your notes are not changed, but this history cannot be restored from inside the plugin."
     });
-    new import_obsidian9.Setting(this.contentEl).addButton(
+    new import_obsidian12.Setting(this.contentEl).addButton(
       (button) => button.setButtonText("Cancel").onClick(() => this.close())
     ).addButton(
       (button) => button.setButtonText("Clear history").setDestructive().onClick(() => {
@@ -2422,7 +3977,7 @@ var ConfirmClearHistoryModal = class extends import_obsidian9.Modal {
 };
 
 // src/ui/settings-tab.ts
-var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
+var HeatmapSettingTab = class extends import_obsidian13.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2432,13 +3987,13 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
     containerEl.empty();
     containerEl.addClass("vah-settings");
     const save = async () => {
-      this.plugin.saveSettings();
+      await this.plugin.saveSettings();
     };
-    new import_obsidian10.Setting(containerEl).setName("Appearance").setHeading();
+    new import_obsidian13.Setting(containerEl).setName("Appearance").setHeading();
     let baseColorPicker = null;
     let baseColorText = null;
     let syncingBaseColor = false;
-    new import_obsidian10.Setting(containerEl).setName("Square color").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Square color").setDesc(
       "Base color of the heatmap squares. Pick it, or type an RGB value like 64, 196, 99 (or a hex code like #40c463)."
     ).addColorPicker((picker) => {
       baseColorPicker = picker;
@@ -2462,7 +4017,7 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian10.Setting(containerEl).setName("Empty square color").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Empty square color").setDesc(
       "Color for days without activity, as RGB or hex. Leave blank to use the theme default."
     ).addText((text) => {
       text.setPlaceholder("theme default").setValue(
@@ -2480,7 +4035,7 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian10.Setting(containerEl).setName("Metric").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Metric").setDesc(
       "What a day's intensity is based on: how many distinct notes you touched, or the total number of edits."
     ).addDropdown(
       (dd) => dd.addOption("files", "Unique notes per day").addOption("edits", "Total edits per day").setValue(this.plugin.settings.metric).onChange(async (value) => {
@@ -2488,7 +4043,7 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Intensity thresholds").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Intensity thresholds").setDesc(
       "Four ascending numbers, comma separated. Example with '1, 3, 6, 10': 1-2 -> lightest, 3-5 -> light, 6-9 -> dark, 10+ -> darkest."
     ).addText(
       (text) => text.setPlaceholder("1, 3, 6, 10").setValue(this.plugin.settings.thresholds.join(", ")).onChange(async (value) => {
@@ -2499,20 +4054,20 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
         }
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Weeks to show").setDesc("Width of the heatmap in weeks (26 = half a year, 53 = a full year).").addSlider(
+    new import_obsidian13.Setting(containerEl).setName("Weeks to show").setDesc("Width of the heatmap in weeks (26 = half a year, 53 = a full year).").addSlider(
       (slider) => slider.setLimits(8, 53, 1).setValue(this.plugin.settings.weeksToShow).onChange(async (value) => {
         this.plugin.settings.weeksToShow = value;
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Week starts on").addDropdown(
+    new import_obsidian13.Setting(containerEl).setName("Week starts on").addDropdown(
       (dd) => dd.addOption("1", "Monday").addOption("0", "Sunday").setValue(String(this.plugin.settings.firstDayOfWeek)).onChange(async (value) => {
         this.plugin.settings.firstDayOfWeek = parseInt(value, 10);
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Panel theme").setHeading();
-    new import_obsidian10.Setting(containerEl).setName("Backdrop image or video").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Panel theme").setHeading();
+    new import_obsidian13.Setting(containerEl).setName("Backdrop image or video").setDesc(
       "Vault path (e.g. assets/wall.png or clips/loop.mp4) or an https:// URL. Images (PNG/JPG/GIF/WebP) and auto-looping muted videos (MP4/WebM) are supported. Leave blank for none."
     ).addText(
       (text) => text.setPlaceholder("assets/backdrop.mp4").setValue(this.plugin.settings.backdropPath).onChange(async (value) => {
@@ -2520,19 +4075,19 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Backdrop dim").setDesc("Darkens the backdrop so the heatmap stays readable.").addSlider(
+    new import_obsidian13.Setting(containerEl).setName("Backdrop dim").setDesc("Darkens the backdrop so the heatmap stays readable.").addSlider(
       (slider) => slider.setLimits(0, 90, 5).setValue(Math.round(this.plugin.settings.backdropDim * 100)).onChange(async (value) => {
         this.plugin.settings.backdropDim = value / 100;
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Backdrop blur").setDesc("Blur radius in pixels applied to the backdrop.").addSlider(
+    new import_obsidian13.Setting(containerEl).setName("Backdrop blur").setDesc("Blur radius in pixels applied to the backdrop.").addSlider(
       (slider) => slider.setLimits(0, 20, 1).setValue(this.plugin.settings.backdropBlur).onChange(async (value) => {
         this.plugin.settings.backdropBlur = value;
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Panel text color").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Panel text color").setDesc(
       "Overrides the panel's text color only (RGB or hex). Leave blank for the theme default."
     ).addText((text) => {
       text.setPlaceholder("theme default").setValue(
@@ -2550,7 +4105,7 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian10.Setting(containerEl).setName("Panel background color").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Panel background color").setDesc(
       "Overrides the panel's background only (RGB or hex). Leave blank for the theme default."
     ).addText((text) => {
       text.setPlaceholder("theme default").setValue(
@@ -2568,8 +4123,8 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
       });
       text.inputEl.addClass("vah-rgb-input");
     });
-    new import_obsidian10.Setting(containerEl).setName("Tracking").setHeading();
-    new import_obsidian10.Setting(containerEl).setName("Excluded folders").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Tracking").setHeading();
+    new import_obsidian13.Setting(containerEl).setName("Excluded folders").setDesc(
       "Folders that should never count as activity (e.g. templates). One folder path per line."
     ).addTextArea(
       (text) => text.setPlaceholder("templates\narchive/old").setValue(this.plugin.settings.excludeFolders.join("\n")).onChange(async (value) => {
@@ -2577,26 +4132,130 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Daily reflection notes").setHeading();
-    new import_obsidian10.Setting(containerEl).setName("Reflection folder").setDesc(
-      "Folder where daily reflection notes are created when you right-click a square. Leave blank for the vault root."
-    ).addText(
-      (text) => text.setPlaceholder("Daily reflection").setValue(this.plugin.settings.reflectionFolder).onChange(async (value) => {
-        this.plugin.settings.reflectionFolder = value;
+    new import_obsidian13.Setting(containerEl).setName("Task notes").setHeading();
+    if (this.plugin.settings.taskNoteSource !== "obsidian-daily-notes") {
+      new import_obsidian13.Setting(containerEl).setName("Connect Daily Notes").setDesc(
+        "Import this device's core Daily Notes binding, switch task storage to it, and open a read-only migration preview."
+      ).addButton(
+        (button) => button.setButtonText("Connect and review").setCta().onClick(async () => {
+          try {
+            const binding = await this.plugin.dailyNotes.importCoreDailyNotesSettings();
+            new import_obsidian13.Notice(
+              `Heatmap: connected to ${binding.folder || "the vault root"}.`
+            );
+            this.display();
+            new DailyNoteMigrationModal(this.plugin).open();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            new import_obsidian13.Notice(`Heatmap: ${message}`);
+          }
+        })
+      );
+    }
+    new import_obsidian13.Setting(containerEl).setName("Store daily tasks in").setDesc(
+      "Use the same notes as Obsidian's Daily Notes core plugin, or keep the legacy custom reflection folder."
+    ).addDropdown(
+      (dropdown) => dropdown.addOption("unconfigured", "Choose a provider").addOption(
+        "obsidian-daily-notes",
+        "Obsidian Daily Notes (recommended)"
+      ).addOption("custom", "Custom reflection folder").setValue(this.plugin.settings.taskNoteSource).onChange(async (value) => {
+        this.plugin.settings.taskNoteSource = value;
         await save();
+        this.display();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Note name format").setDesc(
-      `Date format for the note file name (moment.js syntax). "YYYY-MM-DD" -> ${momentFn().format(
-        "YYYY-MM-DD"
-      )}.md`
-    ).addText(
-      (text) => text.setPlaceholder("YYYY-MM-DD").setValue(this.plugin.settings.dailyNoteFormat).onChange(async (value) => {
-        this.plugin.settings.dailyNoteFormat = value;
-        await save();
-      })
-    );
-    new import_obsidian10.Setting(containerEl).setName("Tasks heading").setDesc(
+    if (this.plugin.settings.taskNoteSource === "obsidian-daily-notes") {
+      let target = "Not imported yet";
+      if (this.plugin.settings.coreDailyNotesImported) {
+        try {
+          target = this.plugin.dailyNotePath(toDateKey(/* @__PURE__ */ new Date()));
+        } catch {
+          target = "Invalid imported path format";
+        }
+      }
+      const bindingSetting = new import_obsidian13.Setting(containerEl).setName("Daily Notes binding").setDesc(
+        `Current target: ${target}. Import reads the core plugin's folder, format, and template from this device, then stores a stable shared binding.`
+      ).addButton(
+        (button) => button.setButtonText(
+          this.plugin.settings.coreDailyNotesImported ? "Import again" : "Import settings"
+        ).onClick(async () => {
+          try {
+            const binding = await this.plugin.dailyNotes.importCoreDailyNotesSettings();
+            new import_obsidian13.Notice(
+              `Heatmap: Daily Notes now targets ${binding.folder || "the vault root"}.`
+            );
+            this.display();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            new import_obsidian13.Notice(`Heatmap: ${message}`);
+          }
+        })
+      ).addButton(
+        (button) => button.setButtonText("Check this device").onClick(async () => {
+          try {
+            const result = await this.plugin.dailyNotes.checkCoreDailyNotesSettings();
+            new import_obsidian13.Notice(`Heatmap: ${result.message}`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            new import_obsidian13.Notice(`Heatmap: ${message}`);
+          }
+        })
+      );
+      void this.plugin.dailyNotes.checkCoreDailyNotesSettings().then((result) => {
+        if (!bindingSetting.settingEl.isConnected) return;
+        bindingSetting.setDesc(
+          `Current target: ${target}. This device: ${result.message}`
+        );
+      }).catch((error) => {
+        if (!bindingSetting.settingEl.isConnected) return;
+        const message = error instanceof Error ? error.message : String(error);
+        bindingSetting.setDesc(
+          `Current target: ${target}. This device is not verified: ${message}`
+        );
+      });
+      new import_obsidian13.Setting(containerEl).setName("Legacy reflection folder").setDesc(
+        "Former custom folder used only as the migration source. It is never used as the Daily Notes destination."
+      ).addText(
+        (text) => text.setPlaceholder("Daily reflection").setValue(this.plugin.settings.reflectionFolder).onChange(async (value) => {
+          this.plugin.settings.reflectionFolder = value;
+          await save();
+        })
+      );
+      new import_obsidian13.Setting(containerEl).setName("Legacy note format").setDesc(
+        "Former Moment.js path format used to match migration source notes. It must include year, month, and day."
+      ).addText(
+        (text) => text.setPlaceholder("YYYY-MM-DD").setValue(this.plugin.settings.dailyNoteFormat).onChange(async (value) => {
+          this.plugin.settings.dailyNoteFormat = value;
+          await save();
+        })
+      );
+      new import_obsidian13.Setting(containerEl).setName("Legacy note migration").setDesc(
+        "Preview and copy every dated Markdown note from the legacy reflection folder into Daily Notes. Originals are never deleted."
+      ).addButton(
+        (button) => button.setButtonText("Review migration").onClick(() => new DailyNoteMigrationModal(this.plugin).open())
+      );
+    }
+    if (this.plugin.settings.taskNoteSource === "custom") {
+      new import_obsidian13.Setting(containerEl).setName("Reflection folder").setDesc(
+        "Legacy folder where custom daily reflection notes are created. Leave blank for the vault root."
+      ).addText(
+        (text) => text.setPlaceholder("Daily reflection").setValue(this.plugin.settings.reflectionFolder).onChange(async (value) => {
+          this.plugin.settings.reflectionFolder = value;
+          await save();
+        })
+      );
+      new import_obsidian13.Setting(containerEl).setName("Note name format").setDesc(
+        `Date format for custom note paths (Moment.js syntax). "YYYY-MM-DD" -> ${momentFn().format(
+          "YYYY-MM-DD"
+        )}.md`
+      ).addText(
+        (text) => text.setPlaceholder("YYYY-MM-DD").setValue(this.plugin.settings.dailyNoteFormat).onChange(async (value) => {
+          this.plugin.settings.dailyNoteFormat = value;
+          await save();
+        })
+      );
+    }
+    new import_obsidian13.Setting(containerEl).setName("Tasks heading").setDesc(
       'Heading the task is inserted under, e.g. "## Tasks". Created if missing. Leave blank to append tasks at the end of the note.'
     ).addText(
       (text) => text.setPlaceholder("## Tasks").setValue(this.plugin.settings.taskHeading).onChange(async (value) => {
@@ -2604,16 +4263,16 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Day detail").setHeading();
-    new import_obsidian10.Setting(containerEl).setName("Show tasks").setDesc(
-      "To Do-style task list for the selected day, backed by its daily reflection note."
+    new import_obsidian13.Setting(containerEl).setName("Day detail").setHeading();
+    new import_obsidian13.Setting(containerEl).setName("Show tasks").setDesc(
+      "To Do-style task list for the selected day, backed by its configured daily note."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTasks).onChange(async (value) => {
         this.plugin.settings.showTasks = value;
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Notes edited: path display").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Notes edited: path display").setDesc(
       "Show just the file name (cleaner) or the full folder path in the 'Notes edited' list. You can also flip this with the button on the list itself."
     ).addDropdown(
       (dd) => dd.addOption("name", "File name only").addOption("full", "Full folder path").setValue(this.plugin.settings.notesPathDisplay).onChange(async (value) => {
@@ -2621,7 +4280,7 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Show edit timeline").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Show edit timeline").setDesc(
       "Chronological trail of when each note was edited that day and by how much."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showTimeline).onChange(async (value) => {
@@ -2629,7 +4288,7 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Timeline session gap").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Timeline session gap").setDesc(
       "Saves of the same note within this many minutes merge into one timeline entry."
     ).addSlider(
       (slider) => slider.setLimits(5, 60, 5).setValue(this.plugin.settings.sessionGapMinutes).onChange(async (value) => {
@@ -2637,73 +4296,73 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("AI summaries & notifications").setHeading();
-    new import_obsidian10.Setting(containerEl).setName("Device name").setDesc("A local label used to identify this device in synchronized timelines.").addText(
+    new import_obsidian13.Setting(containerEl).setName("AI summaries & notifications").setHeading();
+    new import_obsidian13.Setting(containerEl).setName("Device name").setDesc("A local label used to identify this device in synchronized timelines.").addText(
       (text) => text.setPlaceholder("Obsidian device").setValue(this.plugin.sync.deviceName).onChange((value) => this.plugin.setDeviceName(value))
     );
-    new import_obsidian10.Setting(containerEl).setName("Automation device").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Automation device").setDesc(
       "Only one device runs automatic summaries, preventing duplicate API requests."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.isAutomationDevice()).onChange((value) => {
         this.plugin.setAutomationDevice(value ? this.plugin.sync.deviceId : "");
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Provider").setDesc("Which API the weekly/monthly writing summaries are generated with.").addDropdown(
+    new import_obsidian13.Setting(containerEl).setName("Provider").setDesc("Which API the weekly/monthly writing summaries are generated with.").addDropdown(
       (dd) => dd.addOption("anthropic", "Anthropic (Claude)").addOption("openai", "OpenAI-compatible").setValue(this.plugin.settings.aiProvider).onChange(async (value) => {
         this.plugin.settings.aiProvider = value;
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("API key").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("API key").setDesc(
       "Stored securely on this device. Select an existing secret or create one."
     ).addComponent(
-      (el) => new import_obsidian10.SecretComponent(this.app, el).setValue(this.plugin.settings.aiSecretId).onChange((value) => this.plugin.setAiSecretId(value))
+      (el) => new import_obsidian13.SecretComponent(this.app, el).setValue(this.plugin.settings.aiSecretId).onChange((value) => this.plugin.setAiSecretId(value))
     );
-    new import_obsidian10.Setting(containerEl).setName("Model").setDesc("Blank uses the provider default (claude-sonnet-5 / gpt-4o-mini).").addText(
+    new import_obsidian13.Setting(containerEl).setName("Model").setDesc("Blank uses the provider default (claude-sonnet-5 / gpt-4o-mini).").addText(
       (text) => text.setPlaceholder("claude-sonnet-5").setValue(this.plugin.settings.aiModel).onChange(async (value) => {
         this.plugin.settings.aiModel = value.trim();
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("API base URL").setDesc("Optional override for proxies or self-hosted gateways.").addText(
+    new import_obsidian13.Setting(containerEl).setName("API base URL").setDesc("Optional override for proxies or self-hosted gateways.").addText(
       (text) => text.setPlaceholder("https://api.anthropic.com").setValue(this.plugin.settings.aiBaseUrl).onChange(async (value) => {
         this.plugin.settings.aiBaseUrl = value.trim();
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Summary folder").setDesc("Where generated summary notes are saved.").addText(
+    new import_obsidian13.Setting(containerEl).setName("Summary folder").setDesc("Where generated summary notes are saved.").addText(
       (text) => text.setPlaceholder("AI summaries").setValue(this.plugin.settings.aiSummaryFolder).onChange(async (value) => {
         this.plugin.settings.aiSummaryFolder = value;
         await save();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Auto-summarize each week").setDesc("When a new week starts, the completed week is summarized automatically.").addToggle(
+    new import_obsidian13.Setting(containerEl).setName("Auto-summarize each week").setDesc("When a new week starts, the completed week is summarized automatically.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.aiAutoWeekly).onChange(async (value) => {
         this.plugin.settings.aiAutoWeekly = value;
         await save();
         if (value) this.plugin.setAutomationDevice(this.plugin.sync.deviceId);
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Auto-summarize each month").setDesc("When a new month starts, the completed month is summarized automatically.").addToggle(
+    new import_obsidian13.Setting(containerEl).setName("Auto-summarize each month").setDesc("When a new month starts, the completed month is summarized automatically.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.aiAutoMonthly).onChange(async (value) => {
         this.plugin.settings.aiAutoMonthly = value;
         await save();
         if (value) this.plugin.setAutomationDevice(this.plugin.sync.deviceId);
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("System notification").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("System notification").setDesc(
       "Show a desktop notification or an in-app mobile notice when a summary is ready."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.notifyDesktop).onChange((value) => {
         this.plugin.setLocalNotificationEnabled(value);
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("Phone notification webhook").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("Phone notification webhook").setDesc(
       "Securely stored POST endpoint pinged when a summary is ready, such as a private ntfy topic."
     ).addComponent(
-      (el) => new import_obsidian10.SecretComponent(this.app, el).setValue(this.plugin.settings.notifySecretId).onChange((value) => this.plugin.setNotificationSecretId(value))
+      (el) => new import_obsidian13.SecretComponent(this.app, el).setValue(this.plugin.settings.notifySecretId).onChange((value) => this.plugin.setNotificationSecretId(value))
     );
-    new import_obsidian10.Setting(containerEl).setName("Run now").setDesc("Generate a summary of the current period immediately.").addButton(
+    new import_obsidian13.Setting(containerEl).setName("Run now").setDesc("Generate a summary of the current period immediately.").addButton(
       (btn) => btn.setButtonText("This week").onClick(() => {
         const start = this.plugin.weekStartOf(/* @__PURE__ */ new Date());
         void this.plugin.summarizePeriod(
@@ -2727,13 +4386,13 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
         );
       })
     );
-    new import_obsidian10.Setting(containerEl).setName("History").setHeading();
-    new import_obsidian10.Setting(containerEl).setName("Backfill from existing notes").setDesc(
+    new import_obsidian13.Setting(containerEl).setName("History").setHeading();
+    new import_obsidian13.Setting(containerEl).setName("Backfill from existing notes").setDesc(
       "Seed the heatmap from every note's created and last-modified dates. Safe to run repeatedly - it never overwrites live tracking data."
     ).addButton(
       (btn) => btn.setButtonText("Backfill").onClick(() => this.plugin.backfillFromFileStats())
     );
-    new import_obsidian10.Setting(containerEl).setName("Clear all history").setDesc("Deletes every recorded day. This cannot be undone.").addButton(
+    new import_obsidian13.Setting(containerEl).setName("Clear all history").setDesc("Deletes every recorded day. This cannot be undone.").addButton(
       (btn) => btn.setButtonText("Clear").setDestructive().onClick(() => {
         new ConfirmClearHistoryModal(
           this.app,
@@ -2745,7 +4404,7 @@ var HeatmapSettingTab = class extends import_obsidian10.PluginSettingTab {
 };
 
 // src/main.ts
-var VaultActivityHeatmapPlugin = class extends import_obsidian11.Plugin {
+var VaultActivityHeatmapPlugin = class extends import_obsidian14.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
@@ -2754,6 +4413,7 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian11.Plugin {
     this.sync = new SyncService(this, new VaultSyncTransport(this));
     this.activityService = new ActivityService(this);
     this.dailyNotes = new DailyNotesService(this);
+    this.dailyNoteMigration = new DailyNoteMigrationService(this);
     this.aiSummary = new AiSummaryService(this);
     this.notifications = new NotificationService(this);
   }
@@ -2775,12 +4435,17 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian11.Plugin {
     });
     this.addCommand({
       id: "add-task-today",
-      name: "Add task to today's daily reflection",
+      name: "Add task to today's daily note",
       callback: () => {
         new AddTaskModal(this.app, toDateKey(/* @__PURE__ */ new Date()), (text) => {
           void this.addTaskToDailyReflection(toDateKey(/* @__PURE__ */ new Date()), text);
         }).open();
       }
+    });
+    this.addCommand({
+      id: "migrate-legacy-daily-notes",
+      name: "Migrate legacy reflection notes to Daily Notes",
+      callback: () => new DailyNoteMigrationModal(this).open()
     });
     this.addCommand({
       id: "ai-summarize-week",
@@ -2840,7 +4505,7 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian11.Plugin {
     return this.sync.refreshFromDisk();
   }
   async persist() {
-    await this.sync.flush();
+    await this.sync.flush(true);
   }
   saveSettings() {
     this.sync.updateSharedSettings(this.settings);
@@ -2924,20 +4589,20 @@ var VaultActivityHeatmapPlugin = class extends import_obsidian11.Plugin {
     const s = setting.trim();
     if (!s) return null;
     if (/^https?:\/\//i.test(s)) return s;
-    const f = this.app.vault.getAbstractFileByPath((0, import_obsidian11.normalizePath)(s));
-    if (f instanceof import_obsidian11.TFile) return this.app.vault.getResourcePath(f);
+    const f = this.app.vault.getAbstractFileByPath((0, import_obsidian14.normalizePath)(s));
+    if (f instanceof import_obsidian14.TFile) return this.app.vault.getResourcePath(f);
     return null;
   }
   async activateView() {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_HEATMAP);
-    const existingLeaf = import_obsidian11.Platform.isPhone ? existing.find((leaf2) => leaf2.getRoot() === this.app.workspace.rootSplit) : existing[0];
+    const existingLeaf = import_obsidian14.Platform.isPhone ? existing.find((leaf2) => leaf2.getRoot() === this.app.workspace.rootSplit) : existing[0];
     if (existingLeaf) {
       await this.app.workspace.revealLeaf(existingLeaf);
       return;
     }
-    const leaf = import_obsidian11.Platform.isPhone ? this.app.workspace.getLeaf("tab") : this.app.workspace.getRightLeaf(false);
+    const leaf = import_obsidian14.Platform.isPhone ? this.app.workspace.getLeaf("tab") : this.app.workspace.getRightLeaf(false);
     if (!leaf) {
-      new import_obsidian11.Notice("Heatmap: could not open the activity view.");
+      new import_obsidian14.Notice("Heatmap: could not open the activity view.");
       return;
     }
     await leaf.setViewState({ type: VIEW_TYPE_HEATMAP, active: true });
